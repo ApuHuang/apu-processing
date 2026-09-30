@@ -1,0 +1,33 @@
+[project]
+name = "apu-processing"
+dynamic = ["version"]
+description = "APU Processing (Astrophotography Processing Utility)：天文攝影後製"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = ["astropy>=6.0", "numpy>=1.26", "scipy>=1.12", "pillow>=10", "tifffile>=2024.1"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+exe = ["pyinstaller>=6.0"]
+
+[project.scripts]
+apu-processing = "apu_processing.cli:main"
+
+[project.gui-scripts]
+apu-processing-gui = "apu_processing.gui:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "apu_processing.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+apu_processing = ["assets/*.ico", "assets/*.png"]
