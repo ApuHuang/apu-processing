@@ -83,10 +83,13 @@ class ProcessingView(tk.Frame):
         self._scale = root.winfo_fpixels("1i") / 96.0
         self.fonts = Fonts(root)
         setup_style(root, self.px, self.fonts)
+        # 這個 View 專用的事件標籤：加在自己底下每個元件上，不用 bind_all，
+        # 跟別的畫面放在同一個視窗時（整合版的分頁）不會互相搶事件
+        self._tag = f"ApuProcessingView{id(self)}"
+        self.bind_class(self._tag, "<Button-1>", self._maybe_close_popover, add="+")
+        self.bind_class(self._tag, "<Escape>", lambda _e: self.close_popover())
+        self.bind_class(self._tag, "<MouseWheel>", self._scroll_panel, add="+")
         self._build()
-        root.bind_all("<Button-1>", self._maybe_close_popover, add="+")
-        root.bind_all("<Escape>", lambda _e: self.close_popover())
-        root.bind_all("<MouseWheel>", self._scroll_panel, add="+")
         self._poll_job = self.after(50, self._poll)
 
     # ------------------------------------------------------------------ 共用（暗房元件會呼叫）
@@ -232,7 +235,18 @@ class ProcessingView(tk.Frame):
         tk.Label(self.empty, text=APP_NAME, font=self.fonts.hero, fg=Darkroom.label, bg=Darkroom.canvas).pack()
         tk.Label(self.empty, text=tr("gui.empty.hint", shortcut=OPEN_SHORTCUT), font=self.fonts.hero_sub,
                  fg=Darkroom.secondary, bg=Darkroom.canvas, justify="center").pack(pady=(self.px(8), 0))
+        self._tag_widgets(self)
         self._refresh_all()
+
+    def _tag_widgets(self, widget: tk.Misc) -> None:
+        """把這個 View 的事件標籤加到自己和底下每個元件（放在 'all' 之前；重建介面後要再做一次）。"""
+        tags = list(widget.bindtags())
+        if self._tag not in tags:
+            tags.insert(max(0, len(tags) - 1), self._tag)
+            widget.bindtags(tuple(tags))
+        for child in widget.winfo_children():
+            if not isinstance(child, tk.Toplevel):
+                self._tag_widgets(child)
 
     def _build_top_bar(self) -> None:
         D = Darkroom
@@ -484,13 +498,15 @@ class ProcessingView(tk.Frame):
         self.set_status("gui.status.opening", name=path.name)
         self.progress.configure(value=0)
 
+        events = self.events  # 背景工作只抓需要的東西：View 關掉後不會在背景執行緒裡被釋放
+
         def work() -> None:
             try:
                 image, header = imageio.load_image(path)
                 original = stretch.apply(image, stretch.StretchSettings())
-                self.events.put(("opened", path, image, header, original))
+                events.put(("opened", path, image, header, original))
             except Exception as e:  # noqa: BLE001  顯示給使用者
-                self.events.put(("error", tr("gui.error.open", name=path.name), e))
+                events.put(("error", tr("gui.error.open", name=path.name), e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -615,21 +631,23 @@ class ProcessingView(tk.Frame):
         self.set_status("gui.status.processing")
         self._refresh_all()
 
+        events, quick, processor = self.events, self.quick, self.processor  # 同上
+
         def progress(fraction: float, message: object) -> None:
-            self.events.put(("progress", job.generation, fraction, str(message)))
+            events.put(("progress", job.generation, fraction, str(message)))
 
         def work() -> None:
             try:
                 t0 = time.perf_counter()
                 if use_quick:
-                    r = self.quick.run(settings, cancel=job.cancelled.is_set)
-                    self.events.put(("result", job.generation, r, False, time.perf_counter() - t0))
-                r = self.processor.run(settings, progress, job.cancelled.is_set)
-                self.events.put(("result", job.generation, r, True, time.perf_counter() - t0))
+                    r = quick.run(settings, cancel=job.cancelled.is_set)
+                    events.put(("result", job.generation, r, False, time.perf_counter() - t0))
+                r = processor.run(settings, progress, job.cancelled.is_set)
+                events.put(("result", job.generation, r, True, time.perf_counter() - t0))
             except Cancelled:
                 pass
             except Exception as e:  # noqa: BLE001
-                self.events.put(("error", tr("gui.error.process"), e))
+                events.put(("error", tr("gui.error.process"), e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -706,6 +724,8 @@ class ProcessingView(tk.Frame):
         result, adj, header = self.current, self.adjust, self.header
         self.set_status("gui.status.saving", name=path.name)
 
+        events = self.events  # 同上
+
         def work() -> None:
             # 先寫暫存檔再換名：存到一半失敗不會留下壞掉的檔案
             tmp = path.with_name(f".{path.stem}.saving{path.suffix}")
@@ -715,16 +735,22 @@ class ProcessingView(tk.Frame):
                 else:
                     imageio.save_display(tmp, display.apply(result.display, adj))
                 os.replace(tmp, path)
-                self.events.put(("saved", path.name))
+                events.put(("saved", path.name))
             except Exception as e:  # noqa: BLE001
                 tmp.unlink(missing_ok=True)
-                self.events.put(("error", tr("gui.error.save", name=path.name), e))
+                events.put(("error", tr("gui.error.save", name=path.name), e))
 
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------ 結束
 
+    def is_busy(self) -> bool:
+        """有處理工作在跑（關閉視窗前要詢問）。"""
+        return self.job is not None
+
     def close(self) -> None:
+        """取消背景工作、停掉排程。呼叫端接著 destroy() 這個 View；整合版關掉分頁後請在主執行緒 gc.collect()，
+        不然 View 的 Tk 變數可能在背景執行緒被 Python 的循環回收釋放（tkinter 會忽略，但不乾淨）。"""
         self._cancel_job()
         try:
             self.after_cancel(self._poll_job)
@@ -795,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:
     root.bind_all(f"<{mod}-Key-1>", lambda _e: view.canvas.set_zoom(1.0))
 
     def on_close() -> None:
-        if view.job is not None and not messagebox.askyesno(APP_NAME, tr("gui.confirm.quit"), parent=root):
+        if view.is_busy() and not messagebox.askyesno(APP_NAME, tr("gui.confirm.quit"), parent=root):
             return
         view.close()
         root.destroy()

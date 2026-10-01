@@ -3,6 +3,7 @@
 Tk 在同一個行程只建一次（反覆建立、關閉 Tk 在 Windows 偶爾失敗、Mac 雲端機會卡死）。
 """
 
+import gc
 import time
 import tkinter as tk
 
@@ -37,6 +38,8 @@ def view(tk_root, tmp_path, monkeypatch):
     yield v
     v.close()
     v.destroy()
+    del v
+    gc.collect()   # 在主執行緒回收：不然 Tk 變數可能在背景執行緒被釋放（tkinter 的已知狀況）
     set_language("zh")
 
 
@@ -115,3 +118,24 @@ def test_rotate_flip_crop_and_reset(view, tk_root, tmp_path):
     view.reset_geometry()
     _wait(tk_root, lambda: view.current is not None and view.current_is_full and view.job is None)
     assert view.source.shape == (3, H, W)
+
+
+def test_view_keeps_events_to_itself(view, tk_root, tmp_path):
+    """整合版會把好幾個畫面放進同一個視窗：View 不能用 bind_all 搶全視窗的事件。"""
+    for event in ("<Button-1>", "<Escape>", "<MouseWheel>"):
+        assert tk_root.bind_all(event) == ""
+    # 點 View 裡的元件會關掉說明氣泡
+    view.show_popover(view.open_btn, "說明")
+    assert view.popover is not None
+    view.status.event_generate("<Button-1>", x=1, y=1)
+    tk_root.update()
+    assert view.popover is None
+    # 切換語言重建介面後，新的元件也有標籤
+    view.lang_var.set("en")
+    _wait(tk_root, lambda: view.open_btn.cget("text") == "Open", 5)
+    assert view._tag in view.status.bindtags() and view._tag in view.canvas.bindtags()
+    # is_busy：開檔處理中為真、做完為假
+    assert not view.is_busy()
+    view.open_image(_fits(tmp_path))
+    _wait(tk_root, lambda: view.is_busy(), 10)
+    _wait(tk_root, lambda: view.current is not None and view.current_is_full and not view.is_busy())
