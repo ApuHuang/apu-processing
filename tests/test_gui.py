@@ -139,3 +139,56 @@ def test_view_keeps_events_to_itself(view, tk_root, tmp_path):
     view.open_image(_fits(tmp_path))
     _wait(tk_root, lambda: view.is_busy(), 10)
     _wait(tk_root, lambda: view.current is not None and view.current_is_full and not view.is_busy())
+
+
+def test_language_callback_and_hidden_switch(tk_root, tmp_path, monkeypatch):
+    """整合版的外殼傳 on_language 自己換語言；show_language=False 時頂部列不顯示切換。"""
+    from apu_processing.darkroom import Segmented
+
+    monkeypatch.setenv("APU_PROCESSING_SETTINGS", str(tmp_path / "settings.json"))
+    set_language("zh")
+    calls = []
+
+    def shell(lang):
+        calls.append(lang)
+        set_language(lang)
+        v.rebuild()
+
+    v = gui.ProcessingView(tk_root, tk_root, on_language=shell)
+    v.pack(fill="both", expand=True)
+    tk_root.update()
+    try:
+        v.lang_var.set("en")
+        _wait(tk_root, lambda: v.open_btn.cget("text") == "Open", 5)
+        assert calls == ["en"]
+        assert not (tmp_path / "settings.json").exists()      # 存不存語言由外殼決定
+        # 外殼直接換語言再 rebuild：切換鈕跟著換，不會再呼叫 callback
+        set_language("zh")
+        v.rebuild()
+        tk_root.update()
+        assert v.lang_var.get() == "zh" and v.open_btn.cget("text") == tr("gui.btn.open")
+        assert calls == ["en"]
+    finally:
+        v.close()
+        v.destroy()
+    del v, shell
+    gc.collect()
+
+    hidden = gui.ProcessingView(tk_root, tk_root, show_language=False)
+    hidden.pack(fill="both", expand=True)
+    tk_root.update()
+
+    def segments(w):
+        found = [w] if isinstance(w, Segmented) else []
+        for c in w.winfo_children():
+            found += segments(c)
+        return found
+
+    try:
+        assert segments(hidden) and not [w for w in segments(hidden) if w.var is hidden.lang_var]
+    finally:
+        hidden.close()
+        hidden.destroy()
+    del hidden
+    gc.collect()
+    set_language("zh")

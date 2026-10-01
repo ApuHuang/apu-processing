@@ -2,6 +2,7 @@
 
 主畫面是 ProcessingView(tk.Frame)，不自己建立 tk.Tk()；gui.main() 才建立視窗、選單列與快捷鍵。
 將來 APU Astro 整合 App 可以把 ProcessingView 當成一個分頁，用 open_image(path) 開檔。
+對外：open_image(path)、ask_open()、ask_save()、is_busy()、close()、rebuild()（換語言後重建）。
 
 處理流程：開檔 → 背景執行緒跑建議設定（大圖先用縮圖出快速預覽，再換完整結果）→ 改任何設定停手 0.3 秒自動更新，
 只算最新一次（舊的取消）；成品微調只重畫畫面，不重跑管線。
@@ -20,6 +21,7 @@ import traceback
 from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Callable
 
 import numpy as np
 
@@ -50,9 +52,14 @@ class _Job:
 
 
 class ProcessingView(tk.Frame):
-    def __init__(self, parent: tk.Misc, root: tk.Tk):
+    def __init__(self, parent: tk.Misc, root: tk.Tk, *,
+                 on_language: Callable[[str], None] | None = None, show_language: bool = True):
+        """on_language：按下頂部列的語言切換時呼叫（由外面換語言、重建 View 與選單列）；
+        沒給就自己換語言並 rebuild()。show_language=False 時頂部列不顯示語言切換。"""
         super().__init__(parent, bg=Darkroom.canvas)
         self.root = root
+        self.on_language = on_language
+        self.show_language = show_language
         self.path: Path | None = None
         self.header = None
         self.loaded: np.ndarray | None = None          # 原始檔（未裁切旋轉）
@@ -162,7 +169,8 @@ class ProcessingView(tk.Frame):
         for var in self.d.values():
             var.trace_add("write", lambda *_: self._display_changed())
         self.view_var.trace_add("write", lambda *_: self._show_view())
-        self.lang_var.trace_add("write", lambda *_: self.root.after_idle(self._change_language))
+        # 等點擊處理完才重建（切換鈕本身會被 destroy）
+        self.lang_var.trace_add("write", lambda *_: self.root.after_idle(self._language_clicked))
 
     def _settings_from_vars(self) -> pipeline.ProcessingSettings:
         v, s = self.v, self.settings
@@ -264,8 +272,9 @@ class ProcessingView(tk.Frame):
 
         actions = tk.Frame(bar, bg=D.chrome)
         actions.pack(side="right", padx=(0, self.px(14)))
-        Segmented(actions, self, [("zh", "繁中"), ("en", "EN")], self.lang_var).pack(side="left")
-        tk.Frame(actions, bg=D.separator, width=1, height=self.px(18)).pack(side="left", padx=self.px(10))
+        if self.show_language:
+            Segmented(actions, self, [("zh", "繁中"), ("en", "EN")], self.lang_var).pack(side="left")
+            tk.Frame(actions, bg=D.separator, width=1, height=self.px(18)).pack(side="left", padx=self.px(10))
         self.open_btn = ttk.Button(actions, text=tr("gui.btn.open"), style="Dark.TButton", command=self.ask_open)
         self.open_btn.pack(side="left")
         Tooltip(self.open_btn, tr("gui.btn.open.help", shortcut=OPEN_SHORTCUT), self)
@@ -417,12 +426,22 @@ class ProcessingView(tk.Frame):
         if steps:
             self.panel_canvas.yview_scroll(steps, "units")
 
-    def _change_language(self) -> None:
+    def _language_clicked(self) -> None:
         lang = self.lang_var.get()
         if lang == get_language():
             return
-        set_language(lang)
-        save_settings(language=lang)
+        if self.on_language is not None:
+            self.on_language(lang)
+        else:
+            set_language(lang)
+            save_settings(language=lang)
+            self.rebuild()
+
+    def rebuild(self) -> None:
+        """照目前語言重建介面；影像、設定與檢視位置不變。"""
+        if self.lang_var.get() != get_language():
+            self.lang_var.set(get_language())
+        self.close_popover()
         view = (self.canvas.zoom, self.canvas.cx, self.canvas.cy)
         self.canvas.set_crop_mode(False)
         for child in self.winfo_children():
@@ -432,8 +451,6 @@ class ProcessingView(tk.Frame):
         self._show_view()
         self.update_idletasks()
         self._relayout_panel()
-        if hasattr(self.root, "_apu_rebuild_menu"):
-            self.root._apu_rebuild_menu()
 
     # ------------------------------------------------------------------ 狀態
 
@@ -810,9 +827,14 @@ def main(argv: list[str] | None = None) -> int:
     root.minsize(int(1000 * scale), int(660 * scale))
     root.configure(bg=Darkroom.canvas)
     root.title(f"{APP_NAME} {__version__}")
-    view = ProcessingView(root, root)
+    def change_language(lang: str) -> None:
+        set_language(lang)
+        save_settings(language=lang)
+        view.rebuild()
+        _build_menubar(root, view)        # 選單文字跟著換
+
+    view = ProcessingView(root, root, on_language=change_language)
     view.pack(fill="both", expand=True)
-    root._apu_rebuild_menu = lambda: _build_menubar(root, view)  # type: ignore[attr-defined]
     _build_menubar(root, view)
     mod = "Command" if IS_MAC else "Control"
     root.bind_all(f"<{mod}-o>", lambda _e: view.ask_open())
