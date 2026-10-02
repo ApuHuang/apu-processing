@@ -12,6 +12,7 @@ rebuild()（換語言後重建）。
 
 from __future__ import annotations
 
+import gc
 import os
 import queue
 import sys
@@ -86,7 +87,6 @@ class ProcessingView(tk.Frame):
         self.compose_settings: compose.ComposeSettings | None = None
         self.compose_paths: list[Path] = []
         self.compose_filters: list[str] = []
-        self.compose_strength_vars: list[tk.DoubleVar] = []
         self.compose_token = 0
         self._compose_debounce: str | None = None
 
@@ -176,8 +176,14 @@ class ProcessingView(tk.Frame):
         # 合成模式的組合與校色開關（校色另外一個變數：窄帶預設關閉，不改到單張影像的設定）
         self.compose_preset_var = tk.StringVar(value="HOO")
         self.compose_color_var = tk.BooleanVar(value=False)
+        self.compose_palette_var = tk.DoubleVar(value=0)
+        # 每個通道的強度：組合最多 3 個通道，固定 3 個變數重複使用（Tk 變數丟掉後可能在背景執行緒被回收）
+        self.compose_strength_vars = [tk.DoubleVar(value=100) for _ in range(3)]
+        for var in self.compose_strength_vars:
+            var.trace_add("write", lambda *_: self._compose_changed())
         self.compose_preset_var.trace_add("write", lambda *_: self.root.after_idle(self._compose_preset_changed))
         self.compose_color_var.trace_add("write", lambda *_: self._processing_changed())
+        self.compose_palette_var.trace_add("write", lambda *_: self._processing_changed())
         for var in self.v.values():
             var.trace_add("write", lambda *_: self._processing_changed())
         for var in self.d.values():
@@ -447,6 +453,8 @@ class ProcessingView(tk.Frame):
             self.compose_combos.append(combo)
             ParameterSlider(group.body, self, tr("gui.slider.compose_strength"), self.compose_strength_vars[i],
                             0, 300, pct, 5).pack(fill="x", pady=(self.px(4), 0))
+        ParameterSlider(group.body, self, tr("gui.slider.palette"), self.compose_palette_var, 0, 100, pct, 5).pack(
+            fill="x", pady=(self.px(12), 0))
 
     def _compose_source_label(self, index: int) -> str:
         name, filt = self.compose_paths[index].name, self.compose_filters[index]
@@ -491,6 +499,9 @@ class ProcessingView(tk.Frame):
         for child in self.winfo_children():
             child.destroy()
         self._build()
+        # 拆掉的舊元件（例如曲線編輯器自己的 StringVar）在循環參考裡，馬上在主執行緒回收；
+        # 不然背景處理中觸發的回收會在背景執行緒釋放 Tk 變數（tkinter 會報錯）
+        gc.collect()
         self.canvas.zoom, self.canvas.cx, self.canvas.cy = view
         self._show_view()
         self.update_idletasks()
@@ -618,11 +629,9 @@ class ProcessingView(tk.Frame):
             self.compose_preset_var.set(settings.preset)
             if changed_preset:
                 self.compose_color_var.set(not settings.narrowband)
-            self.compose_strength_vars = []
-            for c in settings.channels:
-                var = tk.DoubleVar(value=round(c.strength * 100))
-                var.trace_add("write", lambda *_: self._compose_changed())
-                self.compose_strength_vars.append(var)
+                self.compose_palette_var.set(round(compose.PALETTE_DEFAULTS.get(settings.preset, 0.0) * 100))
+            for var, c in zip(self.compose_strength_vars, settings.channels):
+                var.set(round(c.strength * 100))
         finally:
             self._suspend = False
 
@@ -646,7 +655,7 @@ class ProcessingView(tk.Frame):
         if self._suspend or self.composer is None:
             return
         s = self.compose_settings
-        for i, var in enumerate(self.compose_strength_vars):
+        for i, var in enumerate(self.compose_strength_vars[:len(s.channels)]):
             try:
                 s = s.with_strength(i, float(var.get()) / 100)
             except (tk.TclError, ValueError):
@@ -704,7 +713,6 @@ class ProcessingView(tk.Frame):
     def _opened(self, path: Path, image: np.ndarray, header, original: np.ndarray) -> None:
         leaving_compose = self.composer is not None
         self.composer, self.compose_settings, self.compose_paths, self.compose_filters = None, None, [], []
-        self.compose_strength_vars = []
         self.compose_token += 1          # 還在組的舊合成結果丟掉
         self.path, self.header = path, header
         self.loaded, self.loaded_display = image, original
@@ -825,7 +833,8 @@ class ProcessingView(tk.Frame):
         self.job = job
         settings = self.settings
         if self.composer is not None:
-            settings = replace(settings, color_enabled=bool(self.compose_color_var.get()))
+            settings = replace(settings, color_enabled=bool(self.compose_color_var.get()),
+                               palette=float(self.compose_palette_var.get()) / 100)
         use_quick = quick_first and self.quick_factor > 1
         self.set_status("gui.status.processing")
         self._refresh_all()

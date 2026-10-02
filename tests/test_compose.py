@@ -23,13 +23,25 @@ def test_recommended_follows_filter_names():
     assert compose.ComposeSettings.recommended(["R", "G", "B"]).narrowband is False
 
 
-def test_unmatched_names_are_assigned_in_order():
-    # 拼法不同（H-alpha）不自動當成 Ha：退回 HOO、照順序指定，讓使用者自己改
+def test_common_filter_spellings_are_recognized():
+    # 很多人的濾鏡輪寫 H／O／S
+    s = compose.ComposeSettings.recommended(["H", "O", "S"])
+    assert s.preset == "SHO" and [(c.role, c.source) for c in s.channels] == [("SII", 2), ("Ha", 0), ("OIII", 1)]
     s = compose.ComposeSettings.recommended(["H-alpha", "O3"])
     assert s.preset == "HOO" and [c.source for c in s.channels] == [0, 1]
-    # 兩張開成 SHO：缺的那個角色沒有來源
+    assert compose.role_of(" Halpha ") == "Ha" and compose.role_of("S2") == "SII" and compose.role_of("L") is None
+
+
+def test_unmatched_names_are_assigned_in_order():
+    # 認不得的名稱：退回 HOO、照順序指定，讓使用者自己改
+    s = compose.ComposeSettings.recommended(["Lum", "Filter 5"])
+    assert s.preset == "HOO" and [c.source for c in s.channels] == [0, 1]
+    # 兩張開成 SHO：缺的那個角色先用沒對上的檔案補，不夠就留空
     s = compose.ComposeSettings.for_preset("SHO", ["Ha", "OIII"])
     assert [c.source for c in s.channels] == [-1, 0, 1]
+    # Ha、OIII 切成 RGB：都對不上，照順序補，畫面不會全黑
+    s = compose.ComposeSettings.for_preset("RGB", ["Ha", "OIII"])
+    assert [c.source for c in s.channels] == [0, 1, -1]
 
 
 def test_noise_alignment_and_strength():
@@ -73,6 +85,39 @@ def test_unused_channel_and_rejected_inputs():
     # 疊圖失敗輸出整張 0 的 master：合成前就擋下來，不要到去光才當掉
     with pytest.raises(ValueError, match="b.fits 整張都是同一個值"):
         compose.Composer([ha, np.zeros_like(oiii)], ["a.fits", "b.fits"])
+
+
+def test_hubble_palette_turns_green_into_gold_and_keeps_sky_neutral():
+    rng = np.random.default_rng(3)
+    sky = 0.13
+    img = (sky + rng.normal(0, 0.02, (3, H, W))).astype(np.float32)
+    yy, xx = np.mgrid[0:H, 0:W]
+    nebula = np.exp(-((yy - 300) ** 2 + (xx - 450) ** 2) / (2 * 90 ** 2)).astype(np.float32)
+    img += nebula * np.array([0.20, 0.45, 0.08], np.float32)[:, None, None]   # SHO 典型：Ha（綠）最亮
+    assert compose.hubble_palette(img, 0.0) is img
+    out = compose.hubble_palette(img, 1.0)
+    core = nebula > 0.8
+    r, g, b = (out[c][core].mean() for c in range(3))
+    assert g <= (r + b) / 2 + 0.01 and r > g > b                               # 不再偏綠：紅 > 綠 > 藍（金色）
+    assert abs(out[:, core].mean() - img[:, core].mean()) < 0.01                # 亮度不變
+    far = nebula < 1e-4                                                         # 天空：顏色仍然中性
+    sky_rgb = [out[c][far].mean() for c in range(3)]
+    assert max(sky_rgb) - min(sky_rgb) < 0.003
+
+
+def test_palette_stage_reuses_the_stretch():
+    ha, oiii = _plane(0.012, 0.0009, 0.010, 9), _plane(0.020, 0.0016, 0.002, 10)
+    rgb = compose.Composer([ha, oiii], ["a", "b"]).compose(compose.ComposeSettings.for_preset("SHO", ["Ha", "OIII"]))
+    from dataclasses import replace
+    base = replace(pipeline.ProcessingSettings.recommended(), color_enabled=False)
+    p = pipeline.Processor()
+    p.set_source(rgb)
+    plain = p.run(base)
+    assert "palette" not in plain.computed
+    toned = p.run(replace(base, palette=1.0))
+    assert toned.computed == ("palette",) and not np.array_equal(toned.display, plain.display)
+    assert p.run(replace(base, palette=0.5)).computed == ("palette",)
+    assert p.run(base).computed == () and np.array_equal(p.run(base).display, plain.display)
 
 
 def test_composite_runs_through_pipeline():

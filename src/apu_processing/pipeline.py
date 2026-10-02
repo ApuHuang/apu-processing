@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field, fields
 
 import numpy as np
 
-from . import background, color, denoise, detail, stretch
+from . import background, color, compose, denoise, detail, stretch
 from .i18n import Msg
 from .progress import CancelCheck, Progress, check, never_cancel, no_progress
 
@@ -25,6 +25,8 @@ class ProcessingSettings:
     detail_enabled: bool = True
     detail: detail.DetailSettings = field(default_factory=detail.DetailSettings)
     stretch: stretch.StretchSettings = field(default_factory=stretch.StretchSettings)
+    # 多濾鏡合成的哈伯色調（拉伸後去綠，0–1）。只有合成模式會設；單張影像一律 0
+    palette: float = 0.0
 
     @classmethod
     def recommended(cls) -> ProcessingSettings:
@@ -58,7 +60,7 @@ class Result:
     computed: tuple[str, ...] = ()   # 這次實際重算的階段（其他沿用快取）
 
 
-STAGES = ("background", "color", "denoise", "detail", "stretch")
+STAGES = ("background", "color", "denoise", "detail", "stretch")   # 另有選用的 "palette"（合成的哈伯色調）
 
 
 class Processor:
@@ -144,6 +146,16 @@ class Processor:
             shown = stretch.apply(z, settings.stretch, noise)
             self._cache["stretch"] = (key, shown)
             computed.append("stretch")
+
+        if settings.palette > 0:
+            key = key + (settings.palette,)
+            hit = self._get("palette", key)
+            if hit is None:
+                progress(0.95, Msg("stage.palette"))
+                hit = compose.hubble_palette(shown, settings.palette, self.pixel_scale)
+                self._cache["palette"] = (key, hit)
+                computed.append("palette")
+            shown = hit
         progress(1.0, Msg("stage.done"))
         return Result(z, shown, balance or None, noise, tuple(computed))
 

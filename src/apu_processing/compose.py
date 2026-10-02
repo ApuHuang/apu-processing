@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 from typing import Sequence
 
 import numpy as np
+from scipy import ndimage
 
 from . import stretch
 from .i18n import Msg
@@ -40,9 +41,69 @@ _SUGGEST_ORDER = ("SHO", "HOO", "RGB")
 STRENGTH_RANGE = (0.0, 4.0)
 
 
+# 濾鏡名稱的常見寫法 → 角色。只用來「建議」對應，畫面上看得到也能改，認錯的代價很小，所以比疊圖時的濾鏡分組寬鬆
+# （2026-10-02 使用者決定：H／O／S 這種寫法要自動認）
+ROLE_ALIASES: dict[str, frozenset[str]] = {
+    "Ha": frozenset({"ha", "h", "halpha", "h-alpha", "h_alpha", "h alpha", "hα", "h-α"}),
+    "OIII": frozenset({"oiii", "o3", "o", "o-iii", "o_iii", "o iii"}),
+    "SII": frozenset({"sii", "s2", "s", "s-ii", "s_ii", "s ii"}),
+    "R": frozenset({"r", "red"}),
+    "G": frozenset({"g", "green"}),
+    "B": frozenset({"b", "blue"}),
+}
+
+
 def filter_key(name: object) -> str:
-    """濾鏡名稱的比對鍵：只忽略大小寫與前後空白（Ha 與 H-alpha 這種拼法不同的不當成同一個）。"""
+    """濾鏡名稱的比對鍵：忽略大小寫與前後空白。"""
     return str(name).strip().casefold() if name is not None else ""
+
+
+def role_of(name: object) -> str | None:
+    """這個濾鏡名稱對應的角色（Ha、OIII、SII、R、G、B），認不得就是 None。"""
+    key = filter_key(name)
+    return next((role for role, aliases in ROLE_ALIASES.items() if key in aliases), None)
+
+
+# 哈伯色調（SHO 預設 100%，其他組合 0%）
+PALETTE_DEFAULTS = {"SHO": 1.0}
+PALETTE_BLUR = 2.0        # 判斷綠色超出量用的模糊（完整尺寸像素）
+PALETTE_MAX_GAIN = 2.0    # 補亮度時顏色最多放大幾倍，超過的平均加回三色（2026-10-02 使用者看過 1.5／2／3 倍後選定）
+
+
+def hubble_palette(display: np.ndarray, amount: float, pixel_scale: float = 1.0) -> np.ndarray:
+    """拉伸後的 SHO 去綠成金藍色調，亮度不變。
+
+    綠色超出量用模糊後的影像判斷（e = G − (R+B)/2 的正值）：天空噪聲模糊後幾乎沒有超出量，天空不會被弄成洋紅；
+    星雲的綠色超出是大片平滑的，整片扣掉，不需要「哪裡算天空」的漸變，所以沒有綠邊。
+    扣掉後亮度變暗：先把天空以上的顏色放大補回（倍率用模糊後的亮度算、最多 PALETTE_MAX_GAIN 倍，單點噪聲不會被放大成
+    彩色雜點），補不完的平均加回三色。
+    在拉伸前做會因為各色版分別壓縮而變成黃綠色，所以放在拉伸之後（2026-10-02 用 NGC2244 比較過）。
+    pixel_scale：快速預覽的縮圖一個像素等於完整尺寸幾個像素，模糊半徑跟著換算。
+    """
+    amount = min(1.0, max(0.0, float(amount)))
+    if amount <= 0 or display.ndim != 3:
+        return display
+    blur = max(0.5, PALETTE_BLUR / pixel_scale)
+    r, g, b = (ndimage.gaussian_filter(p, blur) for p in display)
+    lum = (r + g + b) / 3
+    # 天空亮度：最暗四分之一的區塊（跟拉伸量天空同一個方法）
+    t = max(8, int(round(stretch.TILE / pixel_scale)))
+    tiles = stretch.sky_tiles(lum, t)
+    mask = np.zeros(lum.shape, bool)
+    th, tw = tiles.shape
+    mask[:th * t, :tw * t] = np.repeat(np.repeat(tiles, t, 0), t, 1)
+    sky = np.float32(np.median(lum[mask])) if mask.any() else np.float32(np.median(lum))
+
+    excess = np.maximum(0, g - (r + b) / 2) * np.float32(amount)
+    out = display.copy()
+    out[1] -= excess
+    above = np.maximum(lum - sky, 0)                 # 去綠前、天空以上的亮度
+    after = np.maximum(above - excess / 3, 0)        # 去綠後
+    gain = np.minimum(np.float32(PALETTE_MAX_GAIN), (above + 1e-4) / (after + 1e-4))
+    rest = np.maximum(above - after * gain, 0)       # 倍率補不完的部分
+    lifted = sky + (out - sky) * gain[None] + rest[None]
+    out = np.where(above[None] > 0, lifted, out)
+    return np.clip(out, 0, 1).astype(np.float32)
 
 
 @dataclass(frozen=True)
@@ -59,26 +120,28 @@ class ComposeSettings:
 
     @classmethod
     def for_preset(cls, preset: str, filters: Sequence[object] = ()) -> ComposeSettings:
-        """這個組合的設定；每個角色找濾鏡名稱相同、還沒被用掉的輸入，找不到就照順序補。"""
+        """這個組合的設定；每個角色找濾鏡對得上、還沒被用掉的輸入，找不到就照順序補。"""
         roles = [role for role, _ in PRESETS[preset]]
-        keys = [filter_key(f) for f in filters]
+        found = [role_of(f) for f in filters]
         used: set[int] = set()
         sources: list[int] = []
         for role in roles:
-            match = next((i for i, k in enumerate(keys) if k == role.casefold() and i not in used), -1)
+            match = next((i for i, r in enumerate(found) if r == role and i not in used), -1)
             if match >= 0:
                 used.add(match)
             sources.append(match)
-        free = [i for i in range(len(keys)) if i not in used]
+        # 剩下的照順序補：先用認不出角色的檔案，不夠再用認得出但這個組合用不到的（換組合時畫面才不會變全黑）
+        unused = [i for i in range(len(found)) if i not in used]
+        free = [i for i in unused if found[i] is None] + [i for i in unused if found[i] is not None]
         sources = [s if s >= 0 else (free.pop(0) if free else -1) for s in sources]
         return cls(preset, tuple(Channel(role, s) for role, s in zip(roles, sources)))
 
     @classmethod
     def recommended(cls, filters: Sequence[object]) -> ComposeSettings:
-        """依 FILTER 建議組合：每個角色都找得到同名濾鏡的組合優先；都對不上就用 HOO、照順序指定。"""
-        keys = {filter_key(f) for f in filters}
+        """依 FILTER 建議組合：每個角色都找得到的組合優先；都對不上就用 HOO、照順序指定。"""
+        found = {role_of(f) for f in filters}
         for preset in _SUGGEST_ORDER:
-            if all(role.casefold() in keys for role, _ in PRESETS[preset]):
+            if all(role in found for role, _ in PRESETS[preset]):
                 return cls.for_preset(preset, filters)
         return cls.for_preset("HOO", filters)
 

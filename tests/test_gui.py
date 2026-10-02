@@ -175,10 +175,15 @@ def test_open_several_masters_combines_them(view, tk_root, tmp_path):
     view.compose_strength_vars[1].set(200)
     _wait(tk_root, lambda: view.loaded is not before and done() and view._compose_debounce is None)
     assert view.compose_settings.channels[1].strength == 2.0
-    # 換成 RGB：沒有校色開關的限制、面板重建
+    assert view.compose_palette_var.get() == 0 and "palette" not in view.current.computed
+    # 換成 SHO：哈伯色調預設 100%
+    view.compose_preset_var.set("SHO")
+    _wait(tk_root, lambda: view.compose_settings.preset == "SHO" and done() and "palette" in view.current.computed)
+    assert view.compose_palette_var.get() == 100
+    # 換成 RGB：預設校色、沒有哈伯色調、面板重建
     view.compose_preset_var.set("RGB")
     _wait(tk_root, lambda: view.compose_settings.preset == "RGB" and done() and view.compose_color_var.get())
-    assert len(view.compose_strength_vars) == 3
+    assert len(view.compose_strength_vars) == 3 and view.compose_palette_var.get() == 0
     view.compose_preset_var.set("HOO")
     _wait(tk_root, lambda: view.compose_settings.preset == "HOO" and done())
     out = tmp_path / "hoo.fits"

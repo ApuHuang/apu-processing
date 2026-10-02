@@ -107,9 +107,10 @@ _ZH: dict[str, str] = {
     "gui.metric.noise": "噪聲",
     "gui.metric.color": "校色倍率",
     "gui.group.compose": "合成",
-    "gui.group.compose.info": "把幾張單色 master 組成一張彩色影像，再照下面的步驟處理。\nHOO：Ha → 紅，OIII → 綠與藍。SHO：SII → 紅，Ha → 綠，OIII → 藍。RGB：R、G、B 各一張。\n開檔時依每張的濾鏡（FILTER）自動對應；對錯了可以在下拉選單改。\n各通道先扣自己的天空、再把噪聲調成一樣大才組合，所以天空顆粒一致，弱的通道不會被放大成一片噪聲。想讓某個通道更明顯，就把它的強度調高（100% 是預設）。\n窄帶合成的星點顏色不是真實顏色，所以 HOO、SHO 預設不校色。",
+    "gui.group.compose.info": "把幾張單色 master 組成一張彩色影像，再照下面的步驟處理。\nHOO：Ha → 紅，OIII → 綠與藍。SHO：SII → 紅，Ha → 綠，OIII → 藍。RGB：R、G、B 各一張。\n開檔時依每張的濾鏡（FILTER）自動對應，Ha／H、OIII／O、SII／S 這類常見寫法都認得；對錯了可以在下拉選單改。\n各通道先扣自己的天空、再把噪聲調成一樣大才組合，所以天空顆粒一致，弱的通道不會被放大成一片噪聲。想讓某個通道更明顯，就把它的強度調高（100% 是預設）。\n哈伯色調：拉伸後把多出來的綠色換成金、藍色調，亮度不變（SHO 預設 100%，其他 0%）。\n窄帶合成的星點顏色不是真實顏色，所以 HOO、SHO 預設不校色。",
     "gui.compose.none": "（不使用）",
     "gui.slider.compose_strength": "強度",
+    "gui.slider.palette": "哈伯色調",
     "gui.group.processing": "處理",
     "gui.group.processing.info": "去光梯度：扣掉光害與暗角造成的大範圍明暗，星雲不會被當成光害扣掉。\n校色：用星點的平均顏色做白平衡（不需要星表）。\n降噪：壓掉細顆粒與色彩噪聲，保留星雲結構；約保留一半原本的顆粒，看起來自然、不會變成塑膠感。\n細節與縮星：縮小星點（光通量不變、不會有黑圈），並加強星雲的細部。",
     "gui.toggle.background": "去光梯度",
@@ -161,6 +162,7 @@ _ZH: dict[str, str] = {
     "stage.denoise": "降噪…",
     "stage.detail": "細節與星點…",
     "stage.stretch": "拉伸…",
+    "stage.palette": "哈伯色調…",
     "stage.done": "完成",
 }
 
@@ -215,9 +217,10 @@ _EN: dict[str, str] = {
     "gui.metric.noise": "Noise",
     "gui.metric.color": "Color gains",
     "gui.group.compose": "Combine",
-    "gui.group.compose.info": "Combines several mono masters into one color image, which is then processed by the steps below.\nHOO: Ha → red, OIII → green and blue. SHO: SII → red, Ha → green, OIII → blue. RGB: one each for R, G and B.\nEach file is matched by its filter (FILTER) when opened; change it in the drop-down if it is wrong.\nEach channel has its own sky removed and its noise brought to the same level before combining, so the sky grain is even and a weak channel is not blown up into noise. Raise a channel's strength to make it stand out more (100% is the default).\nStar colors in a narrowband combination are not real colors, so HOO and SHO are not color calibrated by default.",
+    "gui.group.compose.info": "Combines several mono masters into one color image, which is then processed by the steps below.\nHOO: Ha → red, OIII → green and blue. SHO: SII → red, Ha → green, OIII → blue. RGB: one each for R, G and B.\nEach file is matched by its filter (FILTER) when opened, including common spellings such as Ha/H, OIII/O and SII/S; change it in the drop-down if it is wrong.\nEach channel has its own sky removed and its noise brought to the same level before combining, so the sky grain is even and a weak channel is not blown up into noise. Raise a channel's strength to make it stand out more (100% is the default).\nHubble palette: after the stretch, excess green is turned into gold and blue tones without changing brightness (100% for SHO, 0% otherwise).\nStar colors in a narrowband combination are not real colors, so HOO and SHO are not color calibrated by default.",
     "gui.compose.none": "(not used)",
     "gui.slider.compose_strength": "Strength",
+    "gui.slider.palette": "Hubble palette",
     "gui.group.processing": "Processing",
     "gui.group.processing.info": "Gradients: removes light pollution and vignetting without taking nebulae for them.\nColor: white balance from the average star color (no catalog needed).\nDenoise: removes fine grain and color noise while keeping nebular structure; about half of the original grain is kept so the result looks natural rather than plastic.\nDetail and stars: makes stars smaller (flux kept, no dark rings) and sharpens nebular detail.",
     "gui.toggle.background": "Remove gradients",
@@ -267,6 +270,7 @@ _EN: dict[str, str] = {
     "stage.denoise": "Reducing noise…",
     "stage.detail": "Detail and stars…",
     "stage.stretch": "Stretching…",
+    "stage.palette": "Hubble palette…",
     "stage.done": "Done",
 }
 
