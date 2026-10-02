@@ -1,6 +1,6 @@
-APU Processing 0.1.0（Astrophotography Processing Utility）
+APU Processing 0.2.0（Astrophotography Processing Utility）
 
-APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式。這是 Python 改寫的第一版，取代 APU Astro v0.9.8（Swift）。
+APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式，取代 APU Astro v0.9.8（Swift）。
 
 第一次開啟（Mac）
 沒有購買 Apple 的付費簽章。第一次開啟被擋下時：「系統設定」→「隱私權與安全性」→ 往下捲到「安全性」→ 按「強制打開」。之後雙擊就能直接開。
@@ -9,14 +9,22 @@ APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式。這是 Pytho
 先把 zip「全部解壓縮」，雙擊 APUProcessing.exe。出現「Windows 已保護您的電腦」時按「其他資訊」→「仍要執行」。
 
 使用方式
-1. 按「開啟」（⌘O／Ctrl+O），選未拉伸的線性影像（FIT／FITS／FTS、TIFF、PNG）；也可以把檔案拖到程式圖示上。
+1. 按「開啟」（⌘O／Ctrl+O），選未拉伸的線性影像（FIT／FITS／FTS、TIFF、PNG）；也可以把檔案拖到程式圖示上。一次選好幾張單色 master 會合成成彩色（見下面「多濾鏡合成」）；也可以選疊圖紀錄（.recipe.json），一次開那次疊出來的所有 master。
 2. 開啟後會自動用建議設定處理：去光梯度 → 校色 → 降噪 → 縮星與星雲細節 → 依噪聲自動拉伸。大圖會先出快速預覽，再換成完整結果。
 3. 右側面板的任何開關或滑桿，停手 0.3 秒後自動更新；頂部可以在「原圖／上次結果／目前結果」之間切換比較，縮放與位置不變。
 4. 「拉伸」：強度 50% 是預設；「背景保留色彩」讓背景帶上暗處微弱星雲的顏色（滿版 Hα 的暗紅、反射星雲的藍），亮度不變，預設 50%。程式分不出暗處是光害還是微弱的星雲，背景太紅或太藍就往下調，0% 是中性的天空。
 5. 「成品微調」（明暗、對比、飽和度、去綠、分色版曲線）只重畫畫面，不用重新處理。
-6. 疊圖邊緣有壞邊時，先按「裁切」拖出要保留的範圍再「套用」；也可以旋轉 90° 與左右／上下翻轉。原始檔不會被修改，「還原」回到原樣。
+6. 疊圖邊緣有壞邊時，先按「裁切」拖出要保留的範圍再「套用」；master 旁邊有覆蓋率圖（檔名加 _coverage）時，可以按「依覆蓋率建議裁切」自動畫出範圍。也可以旋轉 90° 與左右／上下翻轉。原始檔不會被修改，「還原」回到原樣。
 7. 滾輪或觸控板縮放（以游標為中心），拖曳平移，雙擊回到符合視窗（⌘0／Ctrl+0；⌘1 是 100%）。
 8. 「儲存」：PNG／JPEG／TIFF（16-bit）存成品；FITS 存線性處理結果（32-bit 浮點）。
+
+多濾鏡合成（0.2.0 新增）
+- 右側最上面的「合成」可以切換 HOO（Ha → 紅，OIII → 綠與藍）、SHO（SII → 紅，Ha → 綠，OIII → 藍）、RGB。
+- 依每張的濾鏡（FITS 的 FILTER）自動對應，Ha／H、OIII／O、SII／S 這類常見寫法都認得；對錯了在下拉選單改。
+- 各通道先扣自己的天空、把噪聲調成一樣大再組合，天空顆粒一致，弱的通道不會被放大成一片噪聲。想讓某個通道更明顯就調高它的「強度」（100% 是預設）。
+- 「哈伯色調」：拉伸後把多出來的綠色換成金、藍色調，亮度不變（SHO 預設 100%，其他 0%）。
+- 窄帶合成的星點顏色不是真實顏色，所以 HOO、SHO 預設不校色；需要時可以打開「校色」。
+- 有覆蓋率圖時，去光梯度只在覆蓋足夠的地方取樣，邊緣張數少的區域不會把整張的梯度帶歪。
 
 這一版的做法（以 17 組實拍與人工後製成品為基準重新設計）
 - 拉伸依畫面剩下的噪聲決定拉多深，噪聲不會被拉出來；色調擬合自 17 張人工後製成品，預設深度讓星雲亮度與看得到的噪聲都跟成品差不多。
@@ -26,7 +34,9 @@ APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式。這是 Pytho
 已知限制
 - 校色用星點的平均顏色做白平衡，不靠星表；星場的平均星色偏紅或偏藍的目標，顏色會跟用星表校色的結果差一些。
 - Mac 的 Retina 螢幕上，影像顯示解析度是原生的一半（Tk 的限制），放大到 200% 以上沒有差別；存出來的檔案不受影響。
-- 處理速度比 APU Astro v0.9.8 慢（2000 萬像素約 10–15 秒，3000 萬像素約 25 秒）。
+- 處理速度比 APU Astro v0.9.8 慢：Mac M 系列 2000 萬像素約 10–15 秒、3000 萬像素約 25 秒；Windows（Ryzen 5 5600X）約慢一倍，2000 萬像素約 30 秒、3300 萬像素約 55 秒。
+- Windows 上滾輪縮放稍卡（每格約 0.1 秒）。
+- 多濾鏡合成只能在視窗裡做，命令列還不行。
 
 English
 
@@ -35,9 +45,13 @@ APU Processing is the processing app of the APU Astro family. One code base for 
 First launch (Mac): not signed with a paid Apple certificate. If macOS blocks it, open System Settings → Privacy & Security, scroll to Security, and click Open Anyway.
 First launch (Windows): extract the zip, run APUProcessing.exe; if SmartScreen appears, click More info → Run anyway.
 
-1. Open an unstretched linear image (FIT/FITS/FTS, TIFF, PNG). It is processed right away with the recommended settings: gradient removal → color calibration → denoise → star reduction and nebula detail → noise-aware stretch. Large images show a quick preview first.
+1. Open an unstretched linear image (FIT/FITS/FTS, TIFF, PNG). It is processed right away with the recommended settings: gradient removal → color calibration → denoise → star reduction and nebula detail → noise-aware stretch. Large images show a quick preview first. Select several mono masters at once to combine them into color, or open a stacking record (.recipe.json) to load every master from that stacking run.
 2. Every switch and slider updates the result 0.3 s after you stop; compare Original / Previous / Current at the top.
 3. Stretch: 50% strength is the default. Background color (default 50%) tints the background with the color of the faint nebulosity in the dark areas (deep red for full-frame H-alpha, blue for reflection nebulae); the app cannot tell that from light pollution, so lower it if the background looks too red or too blue (0% is a neutral sky).
 4. Finishing (brightness, contrast, saturation, remove green, per-channel curves) only redraws the screen.
-5. Crop, rotate 90°, and flip without touching the file; Reset goes back to the file as loaded.
+5. Crop, rotate 90°, and flip without touching the file; Reset goes back to the file as loaded. When a master has a coverage map next to it (its name with _coverage), "Suggest crop from coverage" draws the well-covered area for you.
 6. Save as PNG / JPEG / TIFF (16-bit) for the finished image, or FITS for the linear result.
+
+Combine (new in 0.2.0): HOO, SHO or RGB from mono masters, matched by their FILTER keyword (common spellings such as Ha/H, OIII/O, SII/S are recognized; change it in the drop-down if wrong). Each channel has its own sky removed and its noise brought to the same level before combining, so a weak channel is not blown up into noise; raise a channel's Strength to make it stand out. Hubble palette (100% for SHO) turns excess green into gold and blue tones after the stretch without changing brightness. HOO and SHO are not color calibrated by default. With coverage maps, gradient removal samples only well-covered areas.
+
+Known limitations: about twice as slow on Windows (Ryzen 5 5600X: 20 MP about 30 s, 33 MP about 55 s) as on Apple silicon; mouse-wheel zoom is a little sluggish on Windows; combining is available in the window only, not on the command line.
