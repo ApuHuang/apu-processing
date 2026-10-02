@@ -61,6 +61,8 @@ _ZH: dict[str, str] = {
     "msg.compose_empty": "沒有要合成的影像",
     "msg.compose_not_mono": "{name} 是彩色影像；合成只接受單色的 master（每個濾鏡一張）",
     "msg.compose_blank": "{name} 整張都是同一個值（例如全黑），沒有影像內容；請重新疊圖",
+    "msg.recipe_unreadable": "{name} 不是看得懂的疊圖紀錄",
+    "msg.recipe_empty": "{name} 列出的 master 都找不到（要跟紀錄檔放在同一個資料夾）",
     "msg.compose_size": "{name}（{size}）跟 {first}（{first_size}）尺寸不同，可能不是同一套器材一起疊出來的；"
                         "合成需要已經對齊、尺寸相同的影像",
     # 介面共用
@@ -71,7 +73,8 @@ _ZH: dict[str, str] = {
     # 頂部列
     "gui.btn.open": "開啟",
     "gui.btn.open.help": "開啟未拉伸的線性影像（{shortcut}）；開啟後自動用建議設定處理。"
-                         "一次選好幾張單色 master（Ha、OIII、SII 或 R、G、B）就會合成成彩色",
+                         "一次選好幾張單色 master（Ha、OIII、SII 或 R、G、B）就會合成成彩色；"
+                         "開疊圖紀錄（.recipe.json）會一次開那次疊出來的所有 master",
     "gui.btn.save": "儲存",
     "gui.btn.save.help": "PNG／JPEG／TIFF 存成品（含成品微調）；FITS 存線性處理結果",
     "gui.btn.recommended": "建議設定",
@@ -103,6 +106,10 @@ _ZH: dict[str, str] = {
     "gui.btn.apply_crop": "套用",
     "gui.btn.reset_geometry": "還原",
     "gui.btn.reset_geometry.help": "取消所有裁切、旋轉與翻轉，回到原始檔（原始檔本來就不會被修改）",
+    "gui.btn.suggest_crop": "依覆蓋率建議裁切",
+    "gui.btn.suggest_crop.help": "疊圖邊緣被較少張蓋到、噪聲高；畫出覆蓋達最多張數 90% 的最大範圍，確認後按「套用」。\n"
+                                 "要有疊圖輸出的覆蓋率圖（master 旁邊加 _coverage 的檔案）才能用",
+    "gui.status.crop_suggested": "已畫出覆蓋足夠的範圍，可以再拖動調整，按「套用」裁切",
     "gui.status.crop": "拖出要保留的範圍，按「套用」",
     "gui.metric.noise": "噪聲",
     "gui.metric.color": "校色倍率",
@@ -147,6 +154,8 @@ _ZH: dict[str, str] = {
     "gui.status.processing": "處理中…",
     "gui.status.quick": "快速預覽（完整結果處理中…）",
     "gui.status.done": "完成（{s} 秒）",
+    "gui.status.done_coverage": "完成（{s} 秒）；邊緣有覆蓋不足的區域，可以按「依覆蓋率建議裁切」",
+    "gui.status.recipe_groups": "這份紀錄有 {n} 套器材，先開 master 最多的「{group}」",
     "gui.status.saving": "正在儲存 {name}…",
     "gui.status.saved": "已儲存 {name}",
     "gui.status.error": "發生錯誤",
@@ -173,6 +182,8 @@ _EN: dict[str, str] = {
     "msg.bad_channels": "{name} has {n} channels; only 1 or 3 are supported",
     "msg.compose_empty": "No images to combine",
     "msg.compose_not_mono": "{name} is a color image; combining takes mono masters (one per filter)",
+    "msg.recipe_unreadable": "{name} is not a stacking record this app can read",
+    "msg.recipe_empty": "None of the masters listed in {name} were found (they must be in the same folder as the record)",
     "msg.compose_blank": "{name} has the same value everywhere (for example all black) and no image content; "
                          "please stack it again",
     "msg.compose_size": "{name} ({size}) and {first} ({first_size}) differ in size and were probably not stacked "
@@ -183,7 +194,8 @@ _EN: dict[str, str] = {
     "gui.empty.hint": "Open an unstretched linear image ({shortcut})\nFIT/FITS/FTS, TIFF, PNG",
     "gui.btn.open": "Open",
     "gui.btn.open.help": "Open an unstretched linear image ({shortcut}); it is processed with the recommended settings. "
-                         "Select several mono masters (Ha, OIII, SII or R, G, B) at once to combine them into color",
+                         "Select several mono masters (Ha, OIII, SII or R, G, B) at once to combine them into color; "
+                         "open a stacking record (.recipe.json) to load every master from that stacking run",
     "gui.btn.save": "Save",
     "gui.btn.save.help": "PNG/JPEG/TIFF save the finished image (with finishing); FITS saves the linear result",
     "gui.btn.recommended": "Recommended",
@@ -213,6 +225,10 @@ _EN: dict[str, str] = {
     "gui.btn.apply_crop": "Apply",
     "gui.btn.reset_geometry": "Reset",
     "gui.btn.reset_geometry.help": "Undo every crop, rotation and flip and go back to the file as loaded (the file itself is never modified)",
+    "gui.btn.suggest_crop": "Suggest crop from coverage",
+    "gui.btn.suggest_crop.help": "Stack edges are covered by fewer frames and are noisier; this draws the largest area covered by at least 90% of the most frames. Press Apply to crop.\n"
+                                 "Needs the coverage map written by the stacking step (the master's name with _coverage)",
+    "gui.status.crop_suggested": "The well-covered area is drawn; adjust it if you like and press Apply",
     "gui.status.crop": "Drag the area to keep, then press Apply",
     "gui.metric.noise": "Noise",
     "gui.metric.color": "Color gains",
@@ -256,6 +272,8 @@ _EN: dict[str, str] = {
     "gui.status.processing": "Processing…",
     "gui.status.quick": "Quick preview (full result on the way…)",
     "gui.status.done": "Done ({s} s)",
+    "gui.status.done_coverage": "Done ({s} s); the edges are poorly covered, try \"Suggest crop from coverage\"",
+    "gui.status.recipe_groups": "This record has {n} equipment groups; opening \"{group}\", which has the most masters",
     "gui.status.saving": "Saving {name}…",
     "gui.status.saved": "Saved {name}",
     "gui.status.error": "Something went wrong",

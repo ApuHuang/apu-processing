@@ -26,3 +26,14 @@ def test_displayed_box_maps_back_to_source():
         back = geometry.displayed_box_to_source(box, g, (60, 40))
         again = geometry.apply(src, Geometry(back, turns, fh, fv))
         assert np.array_equal(again, expected), (crop, turns, fh, fv)
+
+
+def test_source_box_maps_to_displayed_and_back():
+    """建議裁切框（原始檔座標）畫到畫面上，再換回原始檔座標要一模一樣。"""
+    for crop, turns, fh, fv in itertools.product((None, (5, 3, 50, 37)), range(4), (False, True), (False, True)):
+        g = Geometry(crop, turns, fh, fv)
+        box = (8, 6, 44, 30)
+        shown = geometry.source_box_to_displayed(box, g, (60, 40))
+        assert geometry.displayed_box_to_source(shown, g, (60, 40)) == box, (crop, turns, fh, fv)
+    # 跟目前的裁切沒有交集
+    assert geometry.source_box_to_displayed((52, 0, 60, 40), Geometry((5, 3, 50, 37)), (60, 40)) is None

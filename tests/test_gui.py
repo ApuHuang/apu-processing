@@ -197,6 +197,40 @@ def test_open_several_masters_combines_them(view, tk_root, tmp_path):
     assert view.current.balance is not None
 
 
+def test_open_recipe_with_coverage_and_suggested_crop(view, tk_root, tmp_path):
+    import json
+
+    from astropy.io import fits
+
+    ha, oiii = _masters(tmp_path)
+    cov = np.full((H, W), 20, np.uint16)
+    cov[:, :64] = 4                                   # 左邊沒裁切、只有幾張蓋到
+    outputs = []
+    for path in (ha, oiii):
+        cov_path = path.with_name(f"{path.stem}_coverage.fits")
+        hdu = fits.PrimaryHDU(cov)
+        hdu.header["ROWORDER"] = "TOP-DOWN"
+        hdu.writeto(cov_path)
+        outputs.append({"align_group": "QHY @ 250mm", "filter": path.stem.split("_")[1], "frames": 20,
+                        "file": path.name, "coverage": cov_path.name})
+    record = tmp_path / "ngc.recipe.json"
+    record.write_text(json.dumps({"target": "ngc", "outputs": outputs}), encoding="utf-8")
+
+    done = lambda: view.current is not None and view.current_is_full and view.job is None  # noqa: E731
+    view.open_images([record])
+    _wait(tk_root, lambda: view.composer is not None and done())
+    assert view.compose_settings.preset == "HOO" and view.coverage is not None
+    assert view.processor.sample_mask is not None and not view.processor.sample_mask[:, :64].any()
+    assert "依覆蓋率建議裁切" in view.status.cget("text")          # 處理完提示可以建議裁切
+    assert view.suggest_crop_btn.instate(["!disabled"])
+    view.suggest_crop()
+    assert view.canvas.crop_mode and view.canvas.crop_box[0] >= 64 and view.canvas.crop_box[2] == W
+    view.apply_crop()
+    _wait(tk_root, done)
+    assert view.source.shape[-1] <= W - 64 and view.processor.sample_mask is None    # 裁完整張都夠
+    assert view.suggest_crop_btn.instate(["disabled"])
+
+
 def test_masters_of_different_size_are_refused(view, tk_root, tmp_path, monkeypatch):
     errors = []
     monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: errors.append(a))

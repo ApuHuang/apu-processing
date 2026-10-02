@@ -73,11 +73,14 @@ class Processor:
     def __init__(self, pixel_scale: float = 1.0):
         self.pixel_scale = pixel_scale
         self.source: np.ndarray | None = None
+        self.sample_mask: np.ndarray | None = None
         self.revision = 0
         self._cache: dict[str, tuple[tuple, object]] = {}
 
-    def set_source(self, image: np.ndarray | None) -> None:
+    def set_source(self, image: np.ndarray | None, sample_mask: np.ndarray | None = None) -> None:
+        """sample_mask：(H, W) 布林，去光可以取樣的像素（疊圖覆蓋足夠的範圍）；None＝全部。"""
         self.source = image
+        self.sample_mask = sample_mask
         self.revision += 1
         self._cache.clear()
 
@@ -96,8 +99,8 @@ class Processor:
         x = self._get("background", key)
         if x is None:
             progress(0.1, Msg("stage.background"))
-            x = background.correct(self.source, settings.background, cancel) if settings.background_enabled \
-                else self.source
+            x = background.correct(self.source, settings.background, cancel, self.sample_mask) \
+                if settings.background_enabled else self.source
             self._cache["background"] = (key, x)
             computed.append("background")
         check(cancel)

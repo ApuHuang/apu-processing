@@ -97,3 +97,33 @@ def displayed_box_to_source(box: tuple[float, float, float, float], g: Geometry,
         back.append((x, y))
     xs, ys = [p[0] for p in back], [p[1] for p in back]
     return clamp_box((cx0 + min(xs), cy0 + min(ys), cx0 + max(xs), cy0 + max(ys)), source_size[0], source_size[1])
+
+
+def source_box_to_displayed(box: tuple[float, float, float, float], g: Geometry,
+                            source_size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """原始檔座標的框 → 顯示中影像上的框（displayed_box_to_source 的反方向）。框跟目前的裁切範圍沒有交集就回傳 None。"""
+    x0, y0, x1, y1 = box
+    w, h = source_size
+    if g.crop is not None:
+        cx0, cy0, cx1, cy1 = g.crop
+        x0, y0, x1, y1 = max(x0, cx0) - cx0, max(y0, cy0) - cy0, min(x1, cx1) - cx0, min(y1, cy1) - cy0
+        w, h = cx1 - cx0, cy1 - cy0
+    if x1 <= x0 or y1 <= y0:
+        return None
+    turns = g.quarter_turns % 4
+    pts = [(x0, y0), (x1, y1), (x0, y1), (x1, y0)]
+    out = []
+    for x, y in pts:
+        cw, ch = w, h
+        for _ in range(turns):
+            # np.rot90 逆時針一次：轉之前的 (x, y) → (y, W − x)，寬高互換
+            x, y = y, cw - x
+            cw, ch = ch, cw
+        if g.flip_h:
+            x = cw - x
+        if g.flip_v:
+            y = ch - y
+        out.append((x, y))
+    dw, dh = (h, w) if turns % 2 else (w, h)
+    xs, ys = [p[0] for p in out], [p[1] for p in out]
+    return clamp_box((min(xs), min(ys), max(xs), max(ys)), dw, dh)

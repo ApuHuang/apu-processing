@@ -27,7 +27,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import __version__, compose, display, geometry, imageio, pipeline, stretch
+from . import __version__, compose, coverage, display, geometry, imageio, pipeline, recipe, stretch
 from .canvas import ImageCanvas
 from .curves import CurveEditor
 from .darkroom import (IS_MAC, Darkroom, Fonts, MetricRow, PanelGroup, ParameterSlider, ParameterToggle,
@@ -42,7 +42,19 @@ ICON = ASSETS / "app.ico"
 OPEN_SHORTCUT = "⌘O" if IS_MAC else "Ctrl+O"
 DEBOUNCE_MS = 300
 QUICK_LIMIT = 1600           # 長邊超過這個就先出快速預覽
-OPEN_TYPES = [("影像", "*.fit *.fits *.fts *.tif *.tiff *.png"), ("FITS", "*.fit *.fits *.fts"), ("*", "*")]
+OPEN_TYPES = [("影像", "*.fit *.fits *.fts *.tif *.tiff *.png *.recipe.json"), ("FITS", "*.fit *.fits *.fts"),
+              ("recipe", "*.recipe.json"), ("*", "*")]
+
+
+def _load_coverage(path: Path, given: Path | None) -> np.ndarray | None:
+    """master 的覆蓋率（最多張數的幾成）；沒有或讀不了就是 None——覆蓋率只是輔助，不影響開檔。"""
+    found = given if given is not None else coverage.find_for(path)
+    if found is None:
+        return None
+    try:
+        return coverage.load_fraction(found)
+    except (OSError, ValueError):
+        return None
 
 
 class _Job:
@@ -89,6 +101,9 @@ class ProcessingView(tk.Frame):
         self.compose_filters: list[str] = []
         self.compose_token = 0
         self._compose_debounce: str | None = None
+        # 疊圖覆蓋率（最多張數的幾成，原始檔方向）與依它建議的裁切框（原始檔座標）；沒有覆蓋率圖就是 None
+        self.coverage: np.ndarray | None = None
+        self.coverage_box: tuple[int, int, int, int] | None = None
 
         st = load_settings()
         self.panel_state: dict[str, bool] = dict(st.get("panel", {}))
@@ -387,6 +402,10 @@ class ProcessingView(tk.Frame):
                                         command=self.reset_geometry)
         self.reset_geo_btn.pack(side="right")
         Tooltip(self.reset_geo_btn, tr("gui.btn.reset_geometry.help"), self)
+        self.suggest_crop_btn = ttk.Button(group.body, text=tr("gui.btn.suggest_crop"), style="Dark.TButton",
+                                           command=self.suggest_crop)
+        self.suggest_crop_btn.pack(fill="x", pady=(self.px(4), 0))
+        Tooltip(self.suggest_crop_btn, tr("gui.btn.suggest_crop.help"), self)
 
         group = PanelGroup(panel, self, "processing", tr("gui.group.processing"), tr("gui.group.processing.info"))
         ParameterToggle(group.body, self, tr("gui.toggle.background"), self.v["background_enabled"]).pack(
@@ -535,6 +554,8 @@ class ProcessingView(tk.Frame):
         self.crop_btn.configure(text=tr("gui.btn.cancel_crop" if cropping else "gui.btn.crop"))
         self.apply_crop_btn.state(["!disabled"] if cropping and self.canvas.crop_box is not None else ["disabled"])
         self.reset_geo_btn.state(["!disabled"] if has and not self.geometry.is_identity() else ["disabled"])
+        self.suggest_crop_btn.state(["!disabled"] if has and self._suggested_display_box() is not None
+                                    else ["disabled"])
         self.auto_btn.state(["!disabled"] if has else ["disabled"])
         if has:
             self.empty.place_forget()
@@ -567,11 +588,34 @@ class ProcessingView(tk.Frame):
         if paths:
             self.open_images(paths)
 
-    def open_images(self, paths: list[str | Path] | tuple[str | Path, ...]) -> None:
-        """一張就照一般開檔；好幾張就當成同一個目標各濾鏡的單色 master，合成成彩色再處理。"""
+    def open_recipe(self, path: str | Path) -> None:
+        """疊圖紀錄：開同一個對齊組（同一套器材）的所有 master，覆蓋率圖一起帶進來。"""
+        path = Path(path)
+        try:
+            project = recipe.load(path)
+        except ValueError as e:
+            messagebox.showerror(APP_NAME, f"{tr('gui.error.open', name=path.name)}\n\n{e}", parent=self.root)
+            return
+        group, outputs = project.main_group()
+        coverages = [o.coverage for o in outputs]
+        if len(outputs) == 1:
+            self.open_image(outputs[0].path, coverages[0])
+        else:
+            self.open_images([o.path for o in outputs], coverages)
+        if len(project.groups()) > 1:
+            self.set_status("gui.status.recipe_groups", n=len(project.groups()), group=group)
+
+    def open_images(self, paths: list[str | Path] | tuple[str | Path, ...],
+                    coverage_paths: list[Path | None] | None = None) -> None:
+        """一張就照一般開檔；好幾張就當成同一個目標各濾鏡的單色 master，合成成彩色再處理；疊圖紀錄就開它列的 master。
+        coverage_paths：每張的覆蓋率圖；沒給就找 master 旁邊加 _coverage 的檔案。"""
         paths = [Path(p) for p in paths]
+        records = [p for p in paths if recipe.is_recipe(p)]
+        if records:
+            self.open_recipe(records[0])
+            return
         if len(paths) == 1:
-            self.open_image(paths[0])
+            self.open_image(paths[0], coverage_paths[0] if coverage_paths else None)
             return
         self._cancel_job()
         self.set_status("gui.status.opening_many", n=len(paths))
@@ -590,15 +634,21 @@ class ProcessingView(tk.Frame):
                 filters = [str(h.get("FILTER", "")).strip() for h in headers]
                 settings = compose.ComposeSettings.recommended(filters)
                 rgb = composer.compose(settings)
-                events.put(("composed", paths, composer, settings, filters, headers[0], rgb, stretch.apply(rgb)))
+                fractions = [_load_coverage(p, c) for p, c in
+                             zip(paths, coverage_paths or [None] * len(paths))]
+                cov = coverage.combine(fractions, composer.shape)
+                events.put(("composed", paths, composer, settings, filters, headers[0], rgb, stretch.apply(rgb),
+                            cov, coverage.suggest_crop(cov) if cov is not None else None))
             except Exception as e:  # noqa: BLE001  顯示給使用者
                 events.put(("error", tr("gui.error.compose"), e))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _composed(self, paths: list[Path], composer: compose.Composer, settings: compose.ComposeSettings,
-                  filters: list[str], header, rgb: np.ndarray, original: np.ndarray) -> None:
+                  filters: list[str], header, rgb: np.ndarray, original: np.ndarray,
+                  cov: np.ndarray | None, cov_box: tuple[int, int, int, int] | None) -> None:
         self.composer, self.compose_paths, self.compose_filters = composer, paths, filters
+        self.coverage, self.coverage_box = cov, cov_box
         self._compose_base_header = header
         self._set_compose(settings)
         self.path, self.header = paths[0], self._compose_header()
@@ -691,9 +741,13 @@ class ProcessingView(tk.Frame):
         self.header = self._compose_header()
         self._use_source(keep_view=True)
 
-    def open_image(self, path: str | Path) -> None:
-        """開一張影像並自動跑建議設定（整合 App 也呼叫這個）。"""
+    def open_image(self, path: str | Path, coverage_path: Path | None = None) -> None:
+        """開一張影像並自動跑建議設定（整合 App 也呼叫這個）。疊圖紀錄就改開它列的 master。
+        coverage_path：覆蓋率圖；沒給就找旁邊加 _coverage 的檔案。"""
         path = Path(path)
+        if recipe.is_recipe(path):
+            self.open_recipe(path)
+            return
         self._cancel_job()
         self.set_status("gui.status.opening", name=path.name)
         self.progress.configure(value=0)
@@ -704,13 +758,17 @@ class ProcessingView(tk.Frame):
             try:
                 image, header = imageio.load_image(path)
                 original = stretch.apply(image, stretch.StretchSettings())
-                events.put(("opened", path, image, header, original))
+                cov = coverage.combine([_load_coverage(path, coverage_path)], image.shape[-2:])
+                events.put(("opened", path, image, header, original,
+                            cov, coverage.suggest_crop(cov) if cov is not None else None))
             except Exception as e:  # noqa: BLE001  顯示給使用者
                 events.put(("error", tr("gui.error.open", name=path.name), e))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _opened(self, path: Path, image: np.ndarray, header, original: np.ndarray) -> None:
+    def _opened(self, path: Path, image: np.ndarray, header, original: np.ndarray,
+                cov: np.ndarray | None = None, cov_box: tuple[int, int, int, int] | None = None) -> None:
+        self.coverage, self.coverage_box = cov, cov_box
         leaving_compose = self.composer is not None
         self.composer, self.compose_settings, self.compose_paths, self.compose_filters = None, None, [], []
         self.compose_token += 1          # 還在組的舊合成結果丟掉
@@ -729,13 +787,20 @@ class ProcessingView(tk.Frame):
         self.source = image
         self.original_display = geometry.apply(self.loaded_display, self.geometry)
         self.current, self.current_is_full, self.previous_display = None, False, None
-        self.processor.set_source(image)
+        # 去光只在覆蓋足夠的地方取樣（覆蓋率跟著裁切、旋轉、翻轉）
+        mask = None
+        if self.coverage is not None:
+            mask = coverage.good_mask(geometry.apply(self.coverage, self.geometry))
+            if mask.all():
+                mask = None
+        self.processor.set_source(image, mask)
         self.quick_factor = pipeline.preview_factor(image.shape, QUICK_LIMIT)
         if self.quick_factor > 1:
             f = self.quick_factor
             small = np.stack([_block_mean(p, f) for p in (image[None] if image.ndim == 2 else image)])
+            small_mask = _block_mean(mask.astype(np.float32), f) > 0.999 if mask is not None else None
             self.quick = pipeline.Processor(pixel_scale=f)
-            self.quick.set_source(small[0] if image.ndim == 2 else small)
+            self.quick.set_source(small[0] if image.ndim == 2 else small, small_mask)
         self.canvas.set_crop_mode(False)
         self.canvas.set_image(self.original_display, keep_view=keep_view)
         self.view_var.set("current")
@@ -780,6 +845,29 @@ class ProcessingView(tk.Frame):
     def reset_geometry(self) -> None:
         if not self.geometry.is_identity():
             self._set_geometry(geometry.Geometry())
+
+    def _suggested_display_box(self) -> tuple[int, int, int, int] | None:
+        """依覆蓋率建議的裁切框，換成顯示中影像的座標；已經裁在範圍裡面、或沒有建議時是 None。"""
+        if self.coverage_box is None or self.loaded is None:
+            return None
+        size = (self.loaded.shape[-1], self.loaded.shape[-2])
+        box = geometry.source_box_to_displayed(self.coverage_box, self.geometry, size)
+        if box is None or self.source is None:
+            return None
+        h, w = self.source.shape[-2:]
+        return None if box == (0, 0, w, h) else box
+
+    def suggest_crop(self) -> None:
+        """畫出覆蓋足夠的範圍讓使用者確認；按「套用」才真的裁（非破壞，「還原」可以回來）。"""
+        box = self._suggested_display_box()
+        if box is None:
+            return
+        if not self.canvas.crop_mode:
+            self.canvas.set_crop_mode(True)
+            self.view_var.set("original")
+        self.canvas.set_crop_box(box)
+        self.set_status("gui.status.crop_suggested")
+        self._refresh_all()
 
     # ------------------------------------------------------------------ 處理
 
@@ -866,7 +954,8 @@ class ProcessingView(tk.Frame):
             if self.current is not None and self.current_is_full:
                 self.previous_display = self.current.display
             self.job = None
-            self.set_status("gui.status.done", s=f"{elapsed:.1f}")
+            hint = self._suggested_display_box() is not None and not self.canvas.crop_mode
+            self.set_status("gui.status.done_coverage" if hint else "gui.status.done", s=f"{elapsed:.1f}")
             self.progress.configure(value=1.0)
         else:
             self.set_status("gui.status.quick")

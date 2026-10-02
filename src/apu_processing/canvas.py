@@ -162,6 +162,13 @@ class ImageCanvas(tk.Canvas):
         self.configure(cursor="crosshair" if on else "")
         self._draw_crop()
 
+    def set_crop_box(self, box: tuple[float, float, float, float] | None) -> None:
+        """裁切模式下直接畫一個框（影像座標），例如依覆蓋率建議的範圍。"""
+        self.crop_box = box
+        self._draw_crop()
+        if self.on_crop_change:
+            self.on_crop_change()
+
     def _draw_crop(self) -> None:
         if not self.crop_mode or self.crop_box is None:
             self.itemconfigure(self._crop_item, state="hidden")

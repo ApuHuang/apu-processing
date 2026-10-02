@@ -74,7 +74,8 @@ def _robust_sigma(v: np.ndarray) -> float:
 
 
 def model(image: np.ndarray, settings: BackgroundSettings = BackgroundSettings(),
-          cancel: CancelCheck = never_cancel) -> BackgroundModel:
+          cancel: CancelCheck = never_cancel, sample_mask: np.ndarray | None = None) -> BackgroundModel:
+    """sample_mask：(H, W) 布林，可以取樣的像素（例如疊圖覆蓋足夠的範圍）；None＝全部都可以。"""
     planes = image[None] if image.ndim == 2 else image
     C, h, w = planes.shape
     cells = np.stack([_cells(p) for p in planes])
@@ -86,6 +87,14 @@ def model(image: np.ndarray, settings: BackgroundSettings = BackgroundSettings()
     valid[:my] = valid[-my:] = False
     valid[:, :mx] = valid[:, -mx:] = False
     valid &= np.all(cells != 0, axis=0)
+    if sample_mask is not None and sample_mask.shape == (h, w):
+        # 整格都在可取樣範圍裡才用；剩下的格子太少就不管遮罩（照原本的方式）
+        m = sample_mask[:rows * CELL, :cols * CELL].reshape(rows, CELL, cols, CELL).all(axis=(1, 3))
+        if (valid & m).sum() >= 24:
+            valid &= m
+    if not valid.any():
+        # 沒有任何可取樣的格子（例如整張同一個值）：不扣
+        return BackgroundModel(np.zeros((C, h, w), np.float32), valid, cells)
     # 起點：亮度最暗的一半格子
     mask = valid & (L <= np.quantile(L[valid], 0.5))
     for _ in range(settings.iterations):
@@ -108,7 +117,7 @@ def model(image: np.ndarray, settings: BackgroundSettings = BackgroundSettings()
 
 
 def correct(image: np.ndarray, settings: BackgroundSettings = BackgroundSettings(),
-            cancel: CancelCheck = never_cancel) -> np.ndarray:
-    m = model(image, settings, cancel)
+            cancel: CancelCheck = never_cancel, sample_mask: np.ndarray | None = None) -> np.ndarray:
+    m = model(image, settings, cancel, sample_mask)
     out = (image[None] if image.ndim == 2 else image) - m.surfaces
     return out[0] if image.ndim == 2 else out
