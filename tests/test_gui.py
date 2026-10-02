@@ -141,6 +141,68 @@ def test_view_keeps_events_to_itself(view, tk_root, tmp_path):
     _wait(tk_root, lambda: view.current is not None and view.current_is_full and not view.is_busy())
 
 
+def _masters(tmp_path):
+    """同一套器材疊出來的 Ha、OIII 單色 master（FILTER 寫在 header）。"""
+    from astropy.io import fits
+
+    paths = []
+    for i, (name, sky, sigma, gain) in enumerate((("Ha", 0.012, 2e-4, 1.0), ("OIII", 0.020, 4e-4, 0.3))):
+        img = np.stack([sky + gain * _nebula() + _noise((H, W), sigma, 10 + i)])
+        rng = np.random.default_rng(7)
+        for _ in range(40):
+            _add_star(img, rng.uniform(20, H - 20), rng.uniform(20, W - 20), rng.uniform(0.05, 0.5), 3.0)
+        header = fits.Header()
+        header["FILTER"] = name
+        path = tmp_path / f"ngc_{name}.fits"
+        imageio.save_fits(path, img[0], header)
+        paths.append(path)
+    return paths
+
+
+def test_open_several_masters_combines_them(view, tk_root, tmp_path):
+    from astropy.io import fits
+
+    done = lambda: view.current is not None and view.current_is_full and view.job is None  # noqa: E731
+    view.open_images(_masters(tmp_path))
+    _wait(tk_root, done)
+    assert view.composer is not None and view.compose_settings.preset == "HOO"
+    assert view.source.shape == (3, H, W)
+    assert "HOO" in view.doc_title.cget("text")
+    # 窄帶預設不校色，而且不改到單張影像的設定
+    assert view.current.balance is None and view.v["color_enabled"].get()
+    # 調 OIII 強度：重新合成、從頭處理
+    before = view.loaded
+    view.compose_strength_vars[1].set(200)
+    _wait(tk_root, lambda: view.loaded is not before and done() and view._compose_debounce is None)
+    assert view.compose_settings.channels[1].strength == 2.0
+    # 換成 RGB：沒有校色開關的限制、面板重建
+    view.compose_preset_var.set("RGB")
+    _wait(tk_root, lambda: view.compose_settings.preset == "RGB" and done() and view.compose_color_var.get())
+    assert len(view.compose_strength_vars) == 3
+    view.compose_preset_var.set("HOO")
+    _wait(tk_root, lambda: view.compose_settings.preset == "HOO" and done())
+    out = tmp_path / "hoo.fits"
+    view.save(out)
+    _wait(tk_root, lambda: view.status.cget("text") == tr("gui.status.saved", name="hoo.fits"))
+    header = fits.getheader(out)
+    assert header["APUCOMP"] == "HOO" and "FILTER" not in header
+    # 再開一張一般影像：離開合成模式
+    view.open_image(_fits(tmp_path))
+    _wait(tk_root, lambda: view.composer is None and done())
+    assert view.current.balance is not None
+
+
+def test_masters_of_different_size_are_refused(view, tk_root, tmp_path, monkeypatch):
+    errors = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: errors.append(a))
+    ha, oiii = _masters(tmp_path)
+    data, header = imageio.load_image(oiii)
+    imageio.save_fits(oiii, data[:-20], header)
+    view.open_images([ha, oiii])
+    _wait(tk_root, lambda: errors, 30)
+    assert "尺寸不同" in errors[0][1] and view.composer is None
+
+
 def test_language_callback_and_hidden_switch(tk_root, tmp_path, monkeypatch):
     """整合版的外殼傳 on_language 自己換語言；show_language=False 時頂部列不顯示切換。"""
     from apu_processing.darkroom import Segmented

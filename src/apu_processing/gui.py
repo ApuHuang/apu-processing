@@ -2,7 +2,8 @@
 
 主畫面是 ProcessingView(tk.Frame)，不自己建立 tk.Tk()；gui.main() 才建立視窗、選單列與快捷鍵。
 將來 APU Astro 整合 App 可以把 ProcessingView 當成一個分頁，用 open_image(path) 開檔。
-對外：open_image(path)、ask_open()、ask_save()、is_busy()、close()、rebuild()（換語言後重建）。
+對外：open_image(path)、open_images(paths)（好幾張單色 master 合成）、ask_open()、ask_save()、is_busy()、close()、
+rebuild()（換語言後重建）。
 
 處理流程：開檔 → 背景執行緒跑建議設定（大圖先用縮圖出快速預覽，再換完整結果）→ 改任何設定停手 0.3 秒自動更新，
 只算最新一次（舊的取消）；成品微調只重畫畫面，不重跑管線。
@@ -25,7 +26,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import __version__, display, geometry, imageio, pipeline, stretch
+from . import __version__, compose, display, geometry, imageio, pipeline, stretch
 from .canvas import ImageCanvas
 from .curves import CurveEditor
 from .darkroom import (IS_MAC, Darkroom, Fonts, MetricRow, PanelGroup, ParameterSlider, ParameterToggle,
@@ -80,6 +81,14 @@ class ProcessingView(tk.Frame):
         self.popover_owner: tk.Widget | None = None
         self._debounce: str | None = None
         self._status_key = ("gui.status.start", {})
+        # 多濾鏡合成：開了好幾張單色 master 時才有
+        self.composer: compose.Composer | None = None
+        self.compose_settings: compose.ComposeSettings | None = None
+        self.compose_paths: list[Path] = []
+        self.compose_filters: list[str] = []
+        self.compose_strength_vars: list[tk.DoubleVar] = []
+        self.compose_token = 0
+        self._compose_debounce: str | None = None
 
         st = load_settings()
         self.panel_state: dict[str, bool] = dict(st.get("panel", {}))
@@ -164,6 +173,11 @@ class ProcessingView(tk.Frame):
             "saturation": tk.DoubleVar(value=round(a.saturation * 100)),
             "green_removal": tk.DoubleVar(value=round(a.green_removal * 100)),
         }
+        # 合成模式的組合與校色開關（校色另外一個變數：窄帶預設關閉，不改到單張影像的設定）
+        self.compose_preset_var = tk.StringVar(value="HOO")
+        self.compose_color_var = tk.BooleanVar(value=False)
+        self.compose_preset_var.trace_add("write", lambda *_: self.root.after_idle(self._compose_preset_changed))
+        self.compose_color_var.trace_add("write", lambda *_: self._processing_changed())
         for var in self.v.values():
             var.trace_add("write", lambda *_: self._processing_changed())
         for var in self.d.values():
@@ -338,6 +352,9 @@ class ProcessingView(tk.Frame):
         pct = lambda v: f"{v:.0f}%"  # noqa: E731
         signed = lambda v: f"{v:+.0f}"  # noqa: E731
 
+        if self.composer is not None:
+            self._build_compose_group(panel, pct)
+
         group = PanelGroup(panel, self, "info", tr("gui.group.info"), tr("gui.group.info.info"))
         self.metrics = {k: MetricRow(group.body, self, tr(f"gui.metric.{k}")) for k in ("size", "noise", "color")}
         grid = tk.Frame(group.body, bg=D.panel)
@@ -368,7 +385,8 @@ class ProcessingView(tk.Frame):
         group = PanelGroup(panel, self, "processing", tr("gui.group.processing"), tr("gui.group.processing.info"))
         ParameterToggle(group.body, self, tr("gui.toggle.background"), self.v["background_enabled"]).pack(
             fill="x", pady=self.px(2))
-        ParameterToggle(group.body, self, tr("gui.toggle.color"), self.v["color_enabled"]).pack(fill="x", pady=self.px(2))
+        color_var = self.compose_color_var if self.composer is not None else self.v["color_enabled"]
+        ParameterToggle(group.body, self, tr("gui.toggle.color"), color_var).pack(fill="x", pady=self.px(2))
         ParameterToggle(group.body, self, tr("gui.toggle.denoise"), self.v["denoise_enabled"]).pack(
             fill="x", pady=(self.px(8), self.px(2)))
         self.denoise_slider = ParameterSlider(group.body, self, tr("gui.slider.denoise"), self.v["denoise"], 0, 100,
@@ -407,6 +425,32 @@ class ProcessingView(tk.Frame):
                    command=self.curve_editor.reset_channel).pack(side="left")
         ttk.Button(row, text=tr("gui.btn.reset_finishing"), style="Dark.TButton",
                    command=self.reset_finishing).pack(side="left", padx=(self.px(6), 0))
+
+    def _build_compose_group(self, panel: tk.Frame, pct: Callable[[float], str]) -> None:
+        D = Darkroom
+        s = self.compose_settings
+        group = PanelGroup(panel, self, "compose", tr("gui.group.compose"), tr("gui.group.compose.info"))
+        Segmented(group.body, self, [(p, p) for p in compose.PRESETS], self.compose_preset_var, stretch=True).pack(
+            fill="x")
+        choices = [self._compose_source_label(i) for i in range(len(self.compose_paths))] + [tr("gui.compose.none")]
+        weights = dict(compose.PRESETS[s.preset])
+        self.compose_combos = []
+        for i, ch in enumerate(s.channels):
+            target = "+".join(c for c, w in zip("RGB", weights[ch.role]) if w)
+            tk.Label(group.body, text=f"{ch.role} → {target}", font=self.fonts.bold, fg=D.label, bg=D.panel).pack(
+                anchor="w", pady=(self.px(10), self.px(3)))
+            combo = ttk.Combobox(group.body, state="readonly", style="Dark.TCombobox", font=self.fonts.small,
+                                 values=choices)
+            combo.current(ch.source if ch.source >= 0 else len(choices) - 1)
+            combo.bind("<<ComboboxSelected>>", lambda _e, k=i, cb=combo: self._compose_source_changed(k, cb.current()))
+            combo.pack(fill="x")
+            self.compose_combos.append(combo)
+            ParameterSlider(group.body, self, tr("gui.slider.compose_strength"), self.compose_strength_vars[i],
+                            0, 300, pct, 5).pack(fill="x", pady=(self.px(4), 0))
+
+    def _compose_source_label(self, index: int) -> str:
+        name, filt = self.compose_paths[index].name, self.compose_filters[index]
+        return f"{name}（{filt}）" if filt else name
 
     def _scroll_panel(self, event: tk.Event) -> None:
         w = event.widget
@@ -485,7 +529,11 @@ class ProcessingView(tk.Frame):
             self.empty.place_forget()
         else:
             self.empty.place(relx=0.5, rely=0.45, anchor="center")
-        self.doc_title.configure(text=self.path.name if self.path else tr("gui.no_image"))
+        if self.composer is not None:
+            names = [self.compose_paths[c.source].name for c in self.compose_settings.channels if c.source >= 0]
+            self.doc_title.configure(text=f"{self.compose_settings.preset} · {' + '.join(names)}")
+        else:
+            self.doc_title.configure(text=self.path.name if self.path else tr("gui.no_image"))
         self.denoise_slider.set_enabled(bool(self.v["denoise_enabled"].get()))
         on = bool(self.v["detail_enabled"].get())
         self.stars_slider.set_enabled(on)
@@ -503,10 +551,136 @@ class ProcessingView(tk.Frame):
     # ------------------------------------------------------------------ 開檔
 
     def ask_open(self) -> None:
-        path = filedialog.askopenfilename(parent=self.root, title=tr("gui.btn.open"), initialdir=self.last_dir(),
-                                          filetypes=OPEN_TYPES)
-        if path:
-            self.open_image(path)
+        paths = filedialog.askopenfilenames(parent=self.root, title=tr("gui.btn.open"), initialdir=self.last_dir(),
+                                            filetypes=OPEN_TYPES)
+        if paths:
+            self.open_images(paths)
+
+    def open_images(self, paths: list[str | Path] | tuple[str | Path, ...]) -> None:
+        """一張就照一般開檔；好幾張就當成同一個目標各濾鏡的單色 master，合成成彩色再處理。"""
+        paths = [Path(p) for p in paths]
+        if len(paths) == 1:
+            self.open_image(paths[0])
+            return
+        self._cancel_job()
+        self.set_status("gui.status.opening_many", n=len(paths))
+        self.progress.configure(value=0)
+
+        events = self.events  # 同 open_image
+
+        def work() -> None:
+            try:
+                planes, headers = [], []
+                for p in paths:
+                    image, header = imageio.load_image(p)
+                    planes.append(image)
+                    headers.append(header)
+                composer = compose.Composer(planes, [p.name for p in paths])
+                filters = [str(h.get("FILTER", "")).strip() for h in headers]
+                settings = compose.ComposeSettings.recommended(filters)
+                rgb = composer.compose(settings)
+                events.put(("composed", paths, composer, settings, filters, headers[0], rgb, stretch.apply(rgb)))
+            except Exception as e:  # noqa: BLE001  顯示給使用者
+                events.put(("error", tr("gui.error.compose"), e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _composed(self, paths: list[Path], composer: compose.Composer, settings: compose.ComposeSettings,
+                  filters: list[str], header, rgb: np.ndarray, original: np.ndarray) -> None:
+        self.composer, self.compose_paths, self.compose_filters = composer, paths, filters
+        self._compose_base_header = header
+        self._set_compose(settings)
+        self.path, self.header = paths[0], self._compose_header()
+        self.loaded, self.loaded_display = rgb, original
+        self.geometry = geometry.Geometry()
+        save_settings(last_dir=str(paths[0].parent))
+        self.rebuild()                 # 面板多出「合成」那一組
+        self._use_source(keep_view=False)
+
+    def _compose_header(self):
+        """FITS 輸出的 header：第一張的觀測資訊，拿掉單一濾鏡、記下合成方式。"""
+        header = self._compose_base_header.copy()
+        header.remove("FILTER", ignore_missing=True, remove_all=True)
+        s = self.compose_settings
+        header["APUCOMP"] = (s.preset, "APU Processing: channel combination")
+        for c in s.channels:
+            if c.source >= 0:
+                header.add_history(f"APU Processing {s.preset}: {c.role} = {self.compose_paths[c.source].name}"
+                                   f" x{c.strength:.2f}")
+        return header
+
+    def _set_compose(self, settings: compose.ComposeSettings) -> None:
+        """換合成設定：重建每個通道的強度變數；組合換了，校色回到這個組合的預設（窄帶關閉）。"""
+        changed_preset = self.compose_settings is None or self.compose_settings.preset != settings.preset
+        self.compose_settings = settings
+        self._suspend = True
+        try:
+            self.compose_preset_var.set(settings.preset)
+            if changed_preset:
+                self.compose_color_var.set(not settings.narrowband)
+            self.compose_strength_vars = []
+            for c in settings.channels:
+                var = tk.DoubleVar(value=round(c.strength * 100))
+                var.trace_add("write", lambda *_: self._compose_changed())
+                self.compose_strength_vars.append(var)
+        finally:
+            self._suspend = False
+
+    def _compose_preset_changed(self) -> None:
+        if self.composer is None or self._suspend:
+            return
+        preset = self.compose_preset_var.get()
+        if preset == self.compose_settings.preset:
+            return
+        self._set_compose(compose.ComposeSettings.for_preset(preset, self.compose_filters))
+        self.rebuild()
+        self._recompose()
+
+    def _compose_source_changed(self, index: int, choice: int) -> None:
+        source = choice if 0 <= choice < len(self.compose_paths) else -1
+        self.compose_settings = self.compose_settings.with_source(index, source)
+        self._refresh_all()
+        self._recompose()
+
+    def _compose_changed(self) -> None:
+        if self._suspend or self.composer is None:
+            return
+        s = self.compose_settings
+        for i, var in enumerate(self.compose_strength_vars):
+            try:
+                s = s.with_strength(i, float(var.get()) / 100)
+            except (tk.TclError, ValueError):
+                return
+        self.compose_settings = s
+        if self._compose_debounce is not None:
+            self.after_cancel(self._compose_debounce)
+        self._compose_debounce = self.after(DEBOUNCE_MS, self._recompose)
+
+    def _recompose(self) -> None:
+        """依目前的合成設定重組彩色影像（背景執行緒），組好再從頭處理；檢視位置不變。"""
+        self._compose_debounce = None
+        if self.composer is None:
+            return
+        self._cancel_job()
+        self.compose_token += 1
+        token, composer, settings, events = self.compose_token, self.composer, self.compose_settings, self.events
+        self.set_status("gui.status.composing")
+
+        def work() -> None:
+            try:
+                rgb = composer.compose(settings)
+                events.put(("recomposed", token, rgb, stretch.apply(rgb)))
+            except Exception as e:  # noqa: BLE001
+                events.put(("error", tr("gui.error.compose"), e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _recomposed(self, token: int, rgb: np.ndarray, original: np.ndarray) -> None:
+        if token != self.compose_token or self.composer is None:
+            return
+        self.loaded, self.loaded_display = rgb, original
+        self.header = self._compose_header()
+        self._use_source(keep_view=True)
 
     def open_image(self, path: str | Path) -> None:
         """開一張影像並自動跑建議設定（整合 App 也呼叫這個）。"""
@@ -528,10 +702,16 @@ class ProcessingView(tk.Frame):
         threading.Thread(target=work, daemon=True).start()
 
     def _opened(self, path: Path, image: np.ndarray, header, original: np.ndarray) -> None:
+        leaving_compose = self.composer is not None
+        self.composer, self.compose_settings, self.compose_paths, self.compose_filters = None, None, [], []
+        self.compose_strength_vars = []
+        self.compose_token += 1          # 還在組的舊合成結果丟掉
         self.path, self.header = path, header
         self.loaded, self.loaded_display = image, original
         self.geometry = geometry.Geometry()
         save_settings(last_dir=str(path.parent))
+        if leaving_compose:
+            self.rebuild()               # 拿掉「合成」那一組
         self._use_source(keep_view=False)
 
     def _use_source(self, keep_view: bool) -> None:
@@ -644,6 +824,8 @@ class ProcessingView(tk.Frame):
         job = _Job(self.generation)
         self.job = job
         settings = self.settings
+        if self.composer is not None:
+            settings = replace(settings, color_enabled=bool(self.compose_color_var.get()))
         use_quick = quick_first and self.quick_factor > 1
         self.set_status("gui.status.processing")
         self._refresh_all()
@@ -706,6 +888,10 @@ class ProcessingView(tk.Frame):
                 kind = ev[0]
                 if kind == "opened":
                     self._opened(*ev[1:])
+                elif kind == "composed":
+                    self._composed(*ev[1:])
+                elif kind == "recomposed":
+                    self._recomposed(*ev[1:])
                 elif kind == "progress":
                     if ev[1] == self.generation:
                         self.progress.configure(value=ev[2])
@@ -730,9 +916,14 @@ class ProcessingView(tk.Frame):
     def ask_save(self) -> None:
         if self.current is None or not self.current_is_full or self.path is None:
             return
+        stem = self.path.stem
+        if self.composer is not None:
+            # 例如 NGC1499_Ha、NGC1499_OIII → NGC1499_HOO
+            common = os.path.commonprefix([p.stem for p in self.compose_paths]).rstrip(" _-.")
+            stem = f"{common or stem}_{self.compose_settings.preset}"
         path = filedialog.asksaveasfilename(
             parent=self.root, title=tr("gui.btn.save"), initialdir=str(self.path.parent),
-            initialfile=f"{self.path.stem}_APU.png", defaultextension=".png",
+            initialfile=f"{stem}_APU.png", defaultextension=".png",
             filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("TIFF 16-bit", "*.tif"), (tr("gui.save.fits"), "*.fits")])
         if path:
             self.save(Path(path))
@@ -851,11 +1042,11 @@ def main(argv: list[str] | None = None) -> int:
     root.protocol("WM_DELETE_WINDOW", on_close)
     if IS_MAC:
         root.createcommand("::tk::mac::Quit", on_close)
-        root.createcommand("::tk::mac::OpenDocument", lambda *paths: paths and view.open_image(paths[0]))
+        root.createcommand("::tk::mac::OpenDocument", lambda *paths: paths and view.open_images(paths))
     dark_title_bar(root)
     files = [a for a in argv if not a.startswith("-")]
     if files:
-        root.after(200, lambda: view.open_image(files[0]))
+        root.after(200, lambda: view.open_images(files))
     root.mainloop()
     return 0
 

@@ -363,6 +363,16 @@ def setup_style(root: tk.Misc, px: Callable[[float], int], fonts: Fonts) -> None
         style.configure(f"Dark.{orient}.TScrollbar", background=D.control, troughcolor=D.chrome,
                         bordercolor=D.chrome, arrowcolor=D.secondary, lightcolor=D.control, darkcolor=D.control)
         style.map(f"Dark.{orient}.TScrollbar", background=[("active", D.hover)])
+    style.configure("Dark.TCombobox", fieldbackground=D.control, background=D.control, foreground=D.label,
+                    arrowcolor=D.label, bordercolor=D.separator, lightcolor=D.control, darkcolor=D.control,
+                    selectbackground=D.control, selectforeground=D.label, padding=(px(6), px(2)))
+    style.map("Dark.TCombobox", fieldbackground=[("readonly", D.control), ("disabled", D.panel)],
+              foreground=[("disabled", "#6b6b6b")], selectbackground=[("readonly", D.control)])
+    # 下拉清單本身是 Tk 的 Listbox
+    root.option_add("*TCombobox*Listbox.background", D.group_header)
+    root.option_add("*TCombobox*Listbox.foreground", D.label)
+    root.option_add("*TCombobox*Listbox.selectBackground", D.prominent)
+    root.option_add("*TCombobox*Listbox.selectForeground", "white")
 
 
 
