@@ -1,4 +1,4 @@
-APU Processing 0.2.0（Astrophotography Processing Utility）
+APU Processing 0.2.1（Astrophotography Processing Utility）
 
 APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式，取代 APU Astro v0.9.8（Swift）。
 
@@ -37,6 +37,7 @@ APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式，取代 APU A
 - 處理速度比 APU Astro v0.9.8 慢：Mac M 系列 2000 萬像素約 10–15 秒、3000 萬像素約 25 秒；Windows（Ryzen 5 5600X）約慢一倍，2000 萬像素約 30 秒、3300 萬像素約 55 秒。
 - Windows 上滾輪縮放稍卡（每格約 0.1 秒）。
 - 多濾鏡合成只能在視窗裡做，命令列還不行。
+- 還沒疊圖、也還沒解拜耳的彩色相機單張原始檔（FITS 標頭有 BAYERPAT）會被當成單色影像處理，請先疊圖再開。
 
 English
 
@@ -54,4 +55,4 @@ First launch (Windows): extract the zip, run APUProcessing.exe; if SmartScreen a
 
 Combine (new in 0.2.0): HOO, SHO or RGB from mono masters, matched by their FILTER keyword (common spellings such as Ha/H, OIII/O, SII/S are recognized; change it in the drop-down if wrong). Each channel has its own sky removed and its noise brought to the same level before combining, so a weak channel is not blown up into noise; raise a channel's Strength to make it stand out. Hubble palette (100% for SHO) turns excess green into gold and blue tones after the stretch without changing brightness. HOO and SHO are not color calibrated by default. With coverage maps, gradient removal samples only well-covered areas.
 
-Known limitations: about twice as slow on Windows (Ryzen 5 5600X: 20 MP about 30 s, 33 MP about 55 s) as on Apple silicon; mouse-wheel zoom is a little sluggish on Windows; combining is available in the window only, not on the command line.
+Known limitations: about twice as slow on Windows (Ryzen 5 5600X: 20 MP about 30 s, 33 MP about 55 s) as on Apple silicon; mouse-wheel zoom is a little sluggish on Windows; combining is available in the window only, not on the command line; unstacked raw frames from color cameras (Bayer data, BAYERPAT in the FITS header) are treated as mono, so stack them first.
