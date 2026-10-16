@@ -152,17 +152,40 @@ def find_stars(L: np.ndarray, threshold: float = 5.0) -> Stars:
 # ---------------------------------------------------------------------- 縮星
 
 
+def core_fwhm(L: np.ndarray, y: int, x: int, r: int = 8, up: int = 4) -> float | None:
+    """一顆星核心的半高寬：亮度在峰值一半以上、連到星心的面積換成等面積圓的直徑（放大 up 倍量，減少像素格的誤差）。
+    跟二階矩不同，星暈不算進去；拉長的星點也量得合理（不假設圓形高斯）。"""
+    h, w = L.shape
+    if y < r + 3 or x < r + 3 or y >= h - r - 3 or x >= w - r - 3:
+        return None
+    box = L[y - r:y + r + 1, x - r:x + r + 1].astype(np.float64)
+    outer = L[y - r - 3:y + r + 4, x - r - 3:x + r + 4]
+    bg = np.median(np.r_[outer[:3].ravel(), outer[-3:].ravel(), outer[:, :3].ravel(), outer[:, -3:].ravel()])
+    z = ndimage.zoom(box - bg, up, order=1, mode="nearest", grid_mode=True)
+    c0, c1 = (r - 1) * up, (r + 2) * up
+    k = int(np.argmax(z[c0:c1, c0:c1]))
+    py, px = c0 + k // (c1 - c0), c0 + k % (c1 - c0)
+    if z[py, px] <= 0:
+        return None
+    lab, _ = ndimage.label(z >= z[py, px] / 2)
+    area = float((lab == lab[py, px]).sum()) / (up * up)
+    return 2.0 * math.sqrt(area / math.pi)
+
+
+def _typical_stars(stars: Stars):
+    """量星點大小用的星：沒飽和、半徑 1.5–5 px，由大到小。"""
+    for i in np.argsort(-stars.radius):
+        if not stars.saturated[i] and 1.5 <= stars.radius[i] <= 5:
+            yield int(round(stars.y[i])), int(round(stars.x[i]))
+
+
 def measure_fwhm(L: np.ndarray, stars: Stars, limit: int = 300) -> float:
-    """沒飽和、半徑 1.5–5 px 的星，二階矩半高寬的中位數。"""
+    """典型星點二階矩半高寬的中位數（含星暈，決定縮星力道）。"""
     h, w = L.shape
     vals = []
-    order = np.argsort(-stars.radius)
-    for i in order:
+    for y, x in _typical_stars(stars):
         if len(vals) >= limit:
             break
-        if stars.saturated[i] or not 1.5 <= stars.radius[i] <= 5:
-            continue
-        y, x = int(round(stars.y[i])), int(round(stars.x[i]))
         r = 6
         if y < r + 3 or x < r + 3 or y >= h - r - 3 or x >= w - r - 3:
             continue
@@ -177,6 +200,31 @@ def measure_fwhm(L: np.ndarray, stars: Stars, limit: int = 300) -> float:
         cy, cx = (f * yy).sum() / tot, (f * xx).sum() / tot
         vals.append(2.3548 * math.sqrt((f * ((yy - cy) ** 2 + (xx - cx) ** 2)).sum() / tot / 2))
     return float(np.median(vals)) if vals else 3.0
+
+
+def measure_core_fwhm(L: np.ndarray, stars: Stars, limit: int = 300) -> float:
+    """典型星點核心半高寬（core_fwhm）的中位數。"""
+    vals = []
+    for y, x in _typical_stars(stars):
+        if len(vals) >= limit:
+            break
+        v = core_fwhm(L, y, x)
+        if v is not None:
+            vals.append(v)
+    return float(np.median(vals)) if vals else 3.0
+
+
+# 反卷積的 PSF 半高寬最多是星點核心的這個比例。二階矩會把星暈和暗星周圍的噪聲算進去：小星點、噪聲多的資料
+# （例如 2.4"/px 的小望遠鏡）量到核心的 1.7 倍，PSF 比核心還寬 → 縮過頭、核心外挖出一圈暗環（荷包蛋）。
+# 實拍 M63（核心 2.6 px）：PSF 是核心的 0.8 倍以下剖面都單調，1.07 倍就有暗環。一般素材的 PSF 本來就在這以下
+PSF_CORE_LIMIT = 0.8
+
+
+def deconvolution_fwhm(L: np.ndarray, stars: Stars, shrink: float) -> float:
+    """縮星反卷積用的高斯 PSF 半高寬。高斯星點 FWHM_後² = FWHM_前² − FWHM_psf²，要縮成 shrink 倍，
+    PSF = √(1 − shrink²)·FWHM（二階矩，決定力道）；但不超過星點核心的 PSF_CORE_LIMIT 倍。"""
+    return min(math.sqrt(max(0.0, 1 - shrink * shrink)) * measure_fwhm(L, stars),
+               PSF_CORE_LIMIT * measure_core_fwhm(L, stars))
 
 
 def reduce_stars(image: np.ndarray, stars: Stars, settings: DetailSettings,
@@ -196,9 +244,7 @@ def reduce_stars(image: np.ndarray, stars: Stars, settings: DetailSettings,
     if f >= 0.999:
         return image, S
     L = planes.mean(axis=0)
-    fwhm = measure_fwhm(L, stars)
-    # 高斯：FWHM_後² = FWHM_前² − FWHM_psf² → 要縮成 f 倍，PSF 的 FWHM = √(1 − f²)·FWHM
-    psf_sigma = math.sqrt(max(0.0, 1 - f * f)) * fwhm / 2.3548
+    psf_sigma = deconvolution_fwhm(L, stars, f) / 2.3548
     SL = S.mean(axis=0)
     # 大星、飽和星不縮：用權重在原本與反卷積結果之間混合（同一塊裡有大星就整塊保守）
     lab, _ = ndimage.label(stars.mask)

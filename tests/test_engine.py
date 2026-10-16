@@ -124,6 +124,34 @@ def test_processor_reuses_earlier_stages():
     assert pipeline.preview_factor((3, 4000, 6000)) == 4 and pipeline.preview_factor((3, 1000, 1500)) == 1
 
 
+def _add_winged_star(img, y, x, flux, fwhm):
+    """小望遠鏡常見的星點：高斯核心＋寬星暈（三成光通量在 4 倍寬的星暈裡）。"""
+    _add_star(img, y, x, 0.7 * flux, fwhm)
+    _add_star(img, y, x, 0.3 * flux, 4 * fwhm)
+
+
+def test_deconvolution_psf_stays_narrower_than_star_cores():
+    """小核心＋寬星暈、很多暗星：二階矩被星暈與噪聲拉大，縮星的 PSF 不能因此比星點核心還寬（會挖出暗環）；
+    一般乾淨的星點不受上限影響。"""
+    rng = np.random.default_rng(5)
+    img = np.stack([np.full((H, W), 0.02, np.float32) + _noise((H, W), 1e-4, c) for c in range(3)])
+    for _ in range(150):
+        _add_winged_star(img, rng.uniform(30, H - 30), rng.uniform(30, W - 30), rng.uniform(0.01, 0.06), 2.7)
+    L = img.mean(0)
+    stars = detail.find_stars(L)
+    core = detail.measure_core_fwhm(L, stars)
+    assert abs(core / 2.7 - 1) < 0.15
+    assert detail.measure_fwhm(L, stars) > 1.25 * core
+    assert detail.deconvolution_fwhm(L, stars, 0.8) <= detail.PSF_CORE_LIMIT * core + 1e-9
+
+    clean = np.stack([np.full((H, W), 0.02, np.float32) + _noise((H, W), 1e-5, c) for c in range(3)])
+    for _ in range(80):
+        _add_star(clean, rng.uniform(30, H - 30), rng.uniform(30, W - 30), rng.uniform(0.2, 1.0), 4.0)
+    L = clean.mean(0)
+    stars = detail.find_stars(L)
+    assert math.isclose(detail.deconvolution_fwhm(L, stars, 0.8), 0.6 * detail.measure_fwhm(L, stars), rel_tol=1e-9)
+
+
 def test_star_with_halo_stays_monotonic():
     """亮星＋寬星暈縮星後，徑向剖面要從中心往外單調下降（不能有暗環或硬邊暗框）。"""
     base = 0.02
