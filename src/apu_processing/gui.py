@@ -57,6 +57,20 @@ def _load_coverage(path: Path, given: Path | None) -> np.ndarray | None:
         return None
 
 
+def _compose_title(preset: str, stems: list[str], limit: int = 60) -> str:
+    """合成時頂部的名稱：共同的檔名開頭只寫一次，例如 NGC2244_S、_H、_O →「SHO · NGC2244 (S + H + O)」。
+    共同開頭只在分隔符號切（M42_Ha、M43_Ha 不會變成 M4）；太長就截斷（標籤不會自己縮短，會被切掉兩頭）。"""
+    stems = list(dict.fromkeys(stems))
+    common = os.path.commonprefix(stems) if len(stems) > 1 else ""
+    cut = max(common.rfind(c) for c in " _-.") + 1
+    head = common[:cut].rstrip(" _-.")
+    if head:
+        text = f"{preset} · {head} ({' + '.join(s[cut:] or s for s in stems)})"
+    else:
+        text = f"{preset} · {' + '.join(stems)}"
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 class _Job:
     """背景工作：一次處理請求。cancel 設起來就停；generation 較舊的結果丟掉。"""
 
@@ -562,8 +576,8 @@ class ProcessingView(tk.Frame):
         else:
             self.empty.place(relx=0.5, rely=0.45, anchor="center")
         if self.composer is not None:
-            names = [self.compose_paths[c.source].name for c in self.compose_settings.channels if c.source >= 0]
-            self.doc_title.configure(text=f"{self.compose_settings.preset} · {' + '.join(names)}")
+            stems = [self.compose_paths[c.source].stem for c in self.compose_settings.channels if c.source >= 0]
+            self.doc_title.configure(text=_compose_title(self.compose_settings.preset, stems))
         else:
             self.doc_title.configure(text=self.path.name if self.path else tr("gui.no_image"))
         self.denoise_slider.set_enabled(bool(self.v["denoise_enabled"].get()))

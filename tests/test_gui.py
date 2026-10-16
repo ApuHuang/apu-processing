@@ -159,6 +159,13 @@ def _masters(tmp_path):
     return paths
 
 
+def test_compose_title_is_short():
+    assert gui._compose_title("SHO", ["NGC2244_S", "NGC2244_H", "NGC2244_O"]) == "SHO · NGC2244 (S + H + O)"
+    assert gui._compose_title("HOO", ["M42_Ha", "M43_Ha"]) == "HOO · M42_Ha + M43_Ha"   # 不在分隔符號中間切
+    long = gui._compose_title("RGB", ["a" * 30, "b" * 30, "c" * 30])
+    assert len(long) == 60 and long.endswith("…")
+
+
 def test_open_several_masters_combines_them(view, tk_root, tmp_path):
     from astropy.io import fits
 
@@ -167,7 +174,7 @@ def test_open_several_masters_combines_them(view, tk_root, tmp_path):
     _wait(tk_root, done)
     assert view.composer is not None and view.compose_settings.preset == "HOO"
     assert view.source.shape == (3, H, W)
-    assert "HOO" in view.doc_title.cget("text")
+    assert view.doc_title.cget("text") == "HOO · ngc (Ha + OIII)"
     # 窄帶預設不校色，而且不改到單張影像的設定
     assert view.current.balance is None and view.v["color_enabled"].get()
     # 調 OIII 強度：重新合成、從頭處理
