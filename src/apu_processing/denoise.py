@@ -37,6 +37,17 @@ class DenoiseSettings:
     # True：噪聲隨亮度增加的比例只在最小尺度量（那裡幾乎全是噪聲），各尺度只在天空量基準；
     # False：每個尺度各自擬合（大尺度在亮處會把結構當噪聲，門檻變高、結構被壓掉）
     shared_shape: bool = True
+    # 每個尺度的噪聲基準怎麼來（shared_shape 時）：
+    # "octave"（預設）：只量 1、2 px，更大的尺度照白噪聲的規律每放大一倍 × OCTAVE_RATIO（疊圖的噪聲相關只到 1–2 px）。
+    #   拆疊實測（5 組）估計／真值 0.98–1.14；淡結構不再被當成噪聲零星砍掉（斑駁的主因）
+    # "measured"：每個尺度在天空區塊直接量（0.2.1 以前；淡結構會算進去，8 px 估高 1.4–4.6 倍、16 px 3–15 倍）
+    scale_noise: str = "octave"
+
+
+# 2 px 以上每放大一倍，噪聲 × 這個比例（白噪聲的 starlet 是 0.5；拆疊 5 組實測 0.51–0.54）
+OCTAVE_RATIO = 0.52
+# 量 2 px 噪聲時取天空區塊離散度的這個分位數（中位數會把淡結構算進去：拆疊實測偏高 5–21%，25% 分位 1–14%）
+OCTAVE_QUANTILE = 0.25
 
 
 def _atrous_axis(x: np.ndarray, step: int, axis: int) -> np.ndarray:
@@ -114,11 +125,26 @@ def noise_model(w1: np.ndarray, level: np.ndarray) -> tuple[float, float, float]
     return a, max(float(b), 0.0), sky
 
 
-def sky_noise(w: np.ndarray, level: np.ndarray, sky: float) -> float:
-    """係數在「天空」區塊（亮度最暗的 1/4）的離散度²：大尺度的噪聲基準只在天空量，亮處的係數混著結構。"""
+def sky_noise(w: np.ndarray, level: np.ndarray, sky: float, quantile: float = 0.5) -> float:
+    """係數在「天空」區塊（亮度最暗的 1/4）的離散度²：大尺度的噪聲基準只在天空量，亮處的係數混著結構。
+    quantile：取各區塊離散度的哪個分位（預設中位數）。"""
     sig, lev = _tile_stats(w, level)
     dark = lev <= np.quantile(lev, 0.25)
-    return max(float(np.median(sig[dark])) ** 2, 1e-20)
+    return max(float(np.quantile(sig[dark], quantile)) ** 2, 1e-20)
+
+
+def scale_noise(coeffs: list[np.ndarray], level: np.ndarray, a0: float, sky: float, mode: str) -> list[float]:
+    """每個尺度天空的噪聲 σ_j（不含亮度造成的放大）。"""
+    if mode != "octave":
+        return [float(np.sqrt(a0))] + [float(np.sqrt(sky_noise(w, level, sky))) for w in coeffs[1:]]
+    out = [float(np.sqrt(a0))]
+    if len(coeffs) > 1:
+        s1 = float(np.sqrt(sky_noise(coeffs[1], level, sky, OCTAVE_QUANTILE)))
+        for j, w in enumerate(coeffs[1:], start=1):
+            # 推出來的值不超過直接量到的（直接量的只會因為淡結構偏高）
+            measured = float(np.sqrt(sky_noise(w, level, sky))) if j > 1 else s1
+            out.append(min(s1 * OCTAVE_RATIO ** (j - 1), measured))
+    return out
 
 
 def _shrink(w: np.ndarray, thr: np.ndarray | float) -> np.ndarray:
@@ -139,10 +165,11 @@ def clean(image: np.ndarray, settings: DenoiseSettings = DenoiseSettings(),
         acc = residual
         a0, b0, sky = noise_model(coeffs[0], level)
         shape = np.sqrt(1 + (b0 / a0) * np.maximum(level - sky, 0)).astype(np.float32)
+        base = scale_noise(coeffs, level, a0, sky, settings.scale_noise) if settings.shared_shape else None
         for j, w in enumerate(coeffs):
-            # 每個尺度直接量噪聲（疊圖的噪聲有空間相關，不能用白噪聲的比例換算）
+            # 1、2 px 直接量（疊圖的噪聲有空間相關，不能用白噪聲的比例從 1 px 換算）
             if settings.shared_shape:
-                local = (np.sqrt(a0 if j == 0 else sky_noise(w, level, sky)) * shape).astype(np.float32)
+                local = (np.float32(base[j]) * shape).astype(np.float32)
             else:
                 a, b, sky_j = noise_model(w, level)
                 local = np.sqrt(a + b * np.maximum(level - sky_j, 0)).astype(np.float32)

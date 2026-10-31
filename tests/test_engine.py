@@ -68,6 +68,27 @@ def test_denoise_halves_fine_noise_and_keeps_structure():
     assert out.dtype == np.float32 and out.shape == noisy.shape
 
 
+def test_octave_scale_noise_ignores_faint_large_structure():
+    """疊圖的噪聲（相鄰像素相關）＋到處都有的淡大尺度結構（像暗塵）：直接量的大尺度噪聲會把結構算進去，
+    "octave" 只量 1、2 px 再往上推，要接近真正的噪聲。"""
+    from scipy import ndimage
+    k = np.array([0.5, 1.0, 0.5], np.float32)
+    noise = ndimage.convolve1d(ndimage.convolve1d(_noise((H, W), 1e-3, 7), k, axis=0), k, axis=1)
+    texture = ndimage.gaussian_filter(_noise((H, W), 1.0, 8), 12)
+    texture *= np.float32(1.5e-3 / texture.std())
+    img = 0.02 + noise + texture
+    level = denoise._atrous(denoise._atrous(img, 0), 1)
+    coeffs = denoise.starlet(img)[0]
+    a0, _, sky = denoise.noise_model(coeffs[0], level)
+    truth = [math.sqrt(denoise.sky_noise(w, level, sky)) for w in denoise.starlet(noise + 0.02)[0]]
+    measured = denoise.scale_noise(coeffs, level, a0, sky, "measured")
+    octave = denoise.scale_noise(coeffs, level, a0, sky, "octave")
+    for j in range(2, len(coeffs)):
+        assert 0.75 < octave[j] / truth[j] < 1.3, (j, octave[j] / truth[j])
+    assert measured[-1] / truth[-1] > 1.5          # 直接量的被淡結構拉高
+    assert octave[0] == measured[0]                # 1 px 兩種一樣
+
+
 def test_star_reduction_shrinks_keeps_flux_no_dark_ring():
     base = 0.02 + _nebula()
     img = np.stack([base + _noise((H, W), 1e-5, c) for c in range(3)])
