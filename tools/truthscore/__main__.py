@@ -8,6 +8,7 @@
 - 留：訊號保留率。不降噪時應該 ≈ 1（量法的自我檢查，列在 留0）
 - 細／中／大＝1–2、4–8、16–32 px；亮度 L、色差 C
 - 星暈：星點周圍那一圈 處理後 − 答案 的中位數（天空像素噪聲倍數），負的＝暗環
+- 暗星留：暗星（星心 5–50 倍噪聲）r ≤ 2 px 的光通量，處理後 ÷ 不降噪
 """
 
 from __future__ import annotations
@@ -85,6 +86,13 @@ def score_set(root: Path, name: str, methods: list[str], subs: list[str]) -> dic
             for label, img in (("halo", P), ("halo0", P0)):
                 diff = (img.mean(axis=0) - Q.mean(axis=0))[reg.halo]
                 r[label] = float(np.median(diff) / reg.sky_noise) if diff.size else float("nan")
+            ys, xs = reg.faint_stars
+            if len(ys) >= 50:
+                # 暗星光通量：處理後 ÷ 不降噪（同樣的細節處理）；兩邊同一份 A，噪聲大部分抵消
+                f0 = core.star_flux(P0.mean(axis=0), ys, xs)
+                f1 = core.star_flux(P.mean(axis=0), ys, xs)
+                r["faint_star_keep"] = float(f1.sum() / max(f0.sum(), 1e-30))
+                r["faint_stars"] = int(len(ys))
             res[s] = r
         out["methods"][m] = res
     out["region_pixels"] = {k: int(getattr(reg, k).sum()) for k in ("sky", "faint", "bright", "halo")}
@@ -99,7 +107,7 @@ COLUMNS = [
     ("L_faint_keep_large", "暗雲L留大"),
     ("L_bright_keep_fine", "亮雲L留細"), ("L_bright_keep_mid", "亮雲L留中"), ("L_bright_remain_fine", "亮雲L剩細"),
     ("C_faint_keep_mid", "暗雲C留中"),
-    ("L_faint_keep0_mid", "留0"), ("halo", "星暈"), ("halo0", "星暈0"),
+    ("L_faint_keep0_mid", "留0"), ("halo", "星暈"), ("halo0", "星暈0"), ("faint_star_keep", "暗星留"),
 ]
 
 

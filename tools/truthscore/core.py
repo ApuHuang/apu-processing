@@ -95,6 +95,10 @@ def front(split: Split, settings: pipeline.ProcessingSettings) -> tuple[Front, d
 
 def linear_stages(x: np.ndarray, settings: pipeline.ProcessingSettings) -> np.ndarray:
     """管線的降噪與細節兩段（跟 pipeline.Processor 相同的順序與條件）。"""
+    if settings.detail_enabled and settings.detail.layered:
+        layers = detail.split(x)
+        bg = denoise.reduce(layers.background, settings.denoise) if settings.denoise_enabled else layers.background
+        return detail.finish(bg, layers, settings.detail)
     if settings.denoise_enabled:
         x = denoise.reduce(x, settings.denoise)
     if settings.detail_enabled:
@@ -109,6 +113,7 @@ class Regions:
     bright: np.ndarray
     halo: np.ndarray             # 星點往外平滑降到 0 的那一圈（縮星的暗環會在這裡）
     sky_noise: float             # A 未處理、天空的像素噪聲（亮度），暗環偏差的單位
+    faint_stars: tuple[np.ndarray, np.ndarray]   # 暗星（B 上星心 5–50 倍像素噪聲、不飽和）的 (y, x)
 
 
 def regions(xb: np.ndarray, xa_raw: np.ndarray, mask: np.ndarray) -> Regions:
@@ -134,7 +139,29 @@ def regions(xb: np.ndarray, xa_raw: np.ndarray, mask: np.ndarray) -> Regions:
     both = sky_px[:, 1:] & sky_px[:, :-1] & mask[:, 1:]
     d = (La[:, 1:] - La[:, :-1])[both]
     pix = float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2))
-    return Regions(free & sky_px, faint, bright, halo & mask, pix)
+    db = (Lb[:, 1:] - Lb[:, :-1])[both]
+    pix_b = float(1.4826 * np.median(np.abs(db - np.median(db))) / np.sqrt(2))
+    H, W = Lb.shape
+    cy = np.round(stars.y).astype(int)
+    cx = np.round(stars.x).astype(int)
+    inside = (cy >= 12) & (cx >= 12) & (cy < H - 12) & (cx < W - 12)
+    cy, cx, sat = cy[inside], cx[inside], stars.saturated[inside]
+    snr = (Lb[cy, cx] - sky_level) / max(pix_b, 1e-12)
+    pick = (snr >= 5) & (snr < 50) & ~sat & mask[cy, cx]
+    return Regions(free & sky_px, faint, bright, halo & mask, pix, (cy[pick], cx[pick]))
+
+
+def star_flux(L: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    """每顆星 r ≤ 2 px 的光通量，扣掉 6–9 px 圈的中位數。"""
+    yy, xx = np.mgrid[-9:10, -9:10]
+    r = np.hypot(yy, xx)
+    core_ = r <= 2.0
+    ring = (r >= 6) & (r <= 9)
+    out = np.empty(len(ys), np.float64)
+    for i, (y, x) in enumerate(zip(ys, xs)):
+        box = L[y - 9:y + 10, x - 9:x + 10]
+        out[i] = box[core_].sum() - core_.sum() * np.median(box[ring])
+    return out
 
 
 def _planes(img: np.ndarray, kind: str) -> list[np.ndarray]:

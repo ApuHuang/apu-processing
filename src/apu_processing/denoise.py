@@ -8,7 +8,8 @@
 
 D(x)：亮度與兩個色差分開做 starlet（B3 樣條 à trous）分解；每個尺度的噪聲 σ_j 在天空量，
 亮處噪聲較大（光子噪聲），每個尺度用「區塊亮度 → 係數離散度」擬合 σ² = a + b·亮度 來放大門檻；
-係數用非負 garrote 收縮：w·max(0, 1 − (kσ)²/w²)，強的結構幾乎不受影響。
+係數用非負 garrote 收縮：w·max(0, 1 − (kσ)²/E)，E 是周圍 3×3 的平均能量（shrink="neighbour"），強的結構幾乎不受影響。
+色彩噪聲混回的比例可以另外加強（chroma_boost，預設跟亮度一樣）。
 """
 
 from __future__ import annotations
@@ -42,6 +43,20 @@ class DenoiseSettings:
     #   拆疊實測（5 組）估計／真值 0.98–1.14；淡結構不再被當成噪聲零星砍掉（斑駁的主因）
     # "measured"：每個尺度在天空區塊直接量（0.2.1 以前；淡結構會算進去，8 px 估高 1.4–4.6 倍、16 px 3–15 倍）
     scale_noise: str = "octave"
+    # 收縮怎麼決定：
+    # "neighbour"（預設）：看係數周圍 NEIGHBOUR_SIZE² 的平均能量，門檻 × NEIGHBOUR_K。孤立的噪聲峰值（周圍都小）去掉，
+    #   暗星、淡結構（一整塊都比噪聲大）留下。拆疊實測（降噪 100%）暗星光通量 0.71–0.75 → 0.83–0.86、16–32 px 斑駁變少
+    # "coefficient"：每個係數自己跟門檻比（非負 garrote；剛好超過門檻的噪聲留成白點、暗星被砍）
+    shrink: str = "neighbour"
+    # 兩個色差平面的收縮（同上兩種）。鄰域收縮在色差上會留下成片的彩色雜點（17 組評分天空彩噪 1.06→1.19），色差用逐係數
+    chroma_shrink: str = "coefficient"
+    # 色彩噪聲的強度＝amount × 這個倍數（最多 1）。拆疊量到 2 倍時 1–8 px 彩噪剩 0.12–0.21（1 倍 0.50），
+    # 但 17 組評分的色彩細節 0.97→0.33、色塊 0.30→0.52、亮星黑塊 0.018→0.036（大尺度色彩被抹平、亮星彩色星暈變黑斑）→ 預設 1
+    chroma_boost: float = 1.0
+
+
+NEIGHBOUR_SIZE = 3   # 5×5 會把星點旁邊 2 px 內的噪聲一起留下（星點長毛邊），暗星也少留 4–5%
+NEIGHBOUR_K = 0.5
 
 
 # 2 px 以上每放大一倍，噪聲 × 這個比例（白噪聲的 starlet 是 0.5；拆疊 5 組實測 0.51–0.54）
@@ -152,14 +167,28 @@ def _shrink(w: np.ndarray, thr: np.ndarray | float) -> np.ndarray:
     return w * np.maximum(0.0, 1.0 - (thr * thr) / np.maximum(w2, 1e-30))
 
 
+def _shrink_neighbour(w: np.ndarray, thr: np.ndarray | float, size: int = NEIGHBOUR_SIZE) -> np.ndarray:
+    """跟 _shrink 一樣的收縮形狀，但拿來跟門檻比的是周圍 size×size 的平均能量。"""
+    energy = ndimage.uniform_filter(w * w, size=size, mode="reflect")
+    return (w * np.maximum(0.0, 1.0 - (thr * thr) / np.maximum(energy, 1e-30))).astype(np.float32)
+
+
 def clean(image: np.ndarray, settings: DenoiseSettings = DenoiseSettings(),
           cancel: CancelCheck = never_cancel) -> np.ndarray:
     """D(x)：盡量乾淨、不傷結構的降噪結果（還沒混回原圖）。"""
+    _, out = _clean_planes(image, settings, cancel)
+    return out[0] if image.ndim == 2 else _from_opponent(out)
+
+
+def _clean_planes(image: np.ndarray, settings: DenoiseSettings,
+                  cancel: CancelCheck) -> tuple[np.ndarray, np.ndarray]:
+    """回傳 (輸入, 降噪後)，都是亮度＋兩個色差（單色只有一個平面）。"""
     mono = image.ndim == 2
     planes = image[None] if mono else _opponent(image)
     L = planes[0]
     level = _atrous(_atrous(L, 0), 1)  # 局部亮度（約 3 px 平滑）
     def one(p: int) -> np.ndarray:
+        neighbour = (settings.shrink if p == 0 else settings.chroma_shrink) == "neighbour"
         ks = settings.k_luminance if p == 0 else settings.k_chroma
         coeffs, residual = starlet(planes[p], len(ks))
         acc = residual
@@ -173,17 +202,25 @@ def clean(image: np.ndarray, settings: DenoiseSettings = DenoiseSettings(),
             else:
                 a, b, sky_j = noise_model(w, level)
                 local = np.sqrt(a + b * np.maximum(level - sky_j, 0)).astype(np.float32)
-            acc = acc + _shrink(w, ks[j] * local)
+            if neighbour:
+                acc = acc + _shrink_neighbour(w, NEIGHBOUR_K * ks[j] * local)
+            else:
+                acc = acc + _shrink(w, ks[j] * local)
             check(cancel)
         return acc
 
     out = np.stack(list(_POOL.map(one, range(planes.shape[0]))))
-    return out[0] if mono else _from_opponent(out)
+    return planes, out
 
 
 def reduce(image: np.ndarray, settings: DenoiseSettings = DenoiseSettings(),
            cancel: CancelCheck = never_cancel) -> np.ndarray:
+    """輸出 = 原圖 + 強度 × (D − 原圖)；亮度用 amount，色差用 amount × chroma_boost（最多 1）。"""
     if settings.amount <= 0:
         return image
-    d = clean(image, settings, cancel)
-    return (image + np.float32(settings.amount) * (d - image)).astype(np.float32)
+    before, after = _clean_planes(image, settings, cancel)
+    amounts = [settings.amount] + [min(1.0, settings.amount * settings.chroma_boost)] * (before.shape[0] - 1)
+    for p, a in enumerate(amounts):
+        after[p] = before[p] + np.float32(a) * (after[p] - before[p])
+    out = after[0] if image.ndim == 2 else _from_opponent(after)
+    return out.astype(np.float32)
