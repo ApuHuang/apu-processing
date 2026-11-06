@@ -148,12 +148,16 @@ def _faint_signal(planes: np.ndarray, L: np.ndarray, tile: int, sigma: float) ->
 
 
 def curve(u: np.ndarray, background: float) -> np.ndarray:
-    """u（天空以上幾倍噪聲）→ 顯示亮度。天空以下接同斜率的直線，最低 0。"""
+    """u（天空以上幾倍噪聲）→ 顯示亮度。
+    天空以下：t·exp(斜率·u/t)，在天空處跟上面同斜率、往下慢慢壓縮、不會到 0。
+    以前是同斜率的直線（整條曲線最陡的一段），天空以上又是壓縮的 → 比天空暗的噪聲被放大、亮的被壓扁，
+    放大看一顆顆黑點（NGC7635：比天空暗 2 倍噪聲的點直接被截成全黑）。"""
     t = background
     out = np.empty_like(u, dtype=np.float32)
     pos = u >= 0
     out[pos] = t + (1 - t) * (1 - np.power(1 + u[pos] / CURVE_A, -CURVE_P))
-    out[~pos] = t + (1 - t) * (CURVE_P / CURVE_A) * u[~pos]
+    slope = (1 - t) * (CURVE_P / CURVE_A)
+    out[~pos] = t * np.exp(slope * u[~pos] / max(t, 1e-6)) if t > 0 else 0.0
     np.clip(out, 0.0, 1.0, out=out)
     return out
 

@@ -83,3 +83,17 @@ def test_background_color_follows_faint_nebula():
     clean[2] -= 0.1 * emission
     c = sky(stretch.apply(clean, stretch.StretchSettings(background_color=1.0)))
     assert np.ptp(c) < 0.02
+
+
+def test_curve_below_sky_is_compressed_not_clipped():
+    """比天空暗的噪聲不能比亮的更明顯（以前天空以下是最陡的直線，−2.5 倍噪聲就變全黑 → 一顆顆黑點）。"""
+    u = np.linspace(0.5, 6, 12, dtype=np.float32)
+    t = 0.13
+    up = stretch.curve(u, t) - t
+    down = t - stretch.curve(-u, t)
+    assert np.all(down <= up + 1e-6)
+    assert float(stretch.curve(np.array([-20.0], np.float32), t)[0]) > 0
+    eps = 1e-3
+    left = (t - float(stretch.curve(np.array([-eps], np.float32), t)[0])) / eps
+    right = (float(stretch.curve(np.array([eps], np.float32), t)[0]) - t) / eps
+    assert abs(left / right - 1) < 0.01                        # 天空處斜率連續

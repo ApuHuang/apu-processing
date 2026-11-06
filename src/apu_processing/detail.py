@@ -348,13 +348,77 @@ def _shrink_ratio(L: np.ndarray, SL: np.ndarray, stars: Stars, settings: DetailS
     blend = comp_weight[lab]
     del lab
     eps = np.float32(max(1e-12, float(SL.max()) * 1e-7))
-    # 模糊＝圓形的部分（縮小）＋沿長軸多出來的部分（變圓）
+    # 模糊＝圓形的部分（縮小）＋沿長軸多出來的部分（變圓）。拉長的程度分區量（傾斜、像差讓各處不同），每區用自己的
+    zones = _zone_covariances(L, stars, psf_sigma, settings) if settings.round_stars > 0 else None
+    if zones is None:
+        u = _richardson_lucy(SL, gaussian_kernels(_psf_cov(L, stars, psf_sigma, settings)), iterations, eps)
+    else:
+        num = np.zeros_like(SL)
+        den = np.zeros_like(SL)
+        H, W = SL.shape
+        for (y0, y1, x0, x1), cov in zones:
+            ty0, ty1, tx0, tx1 = max(0, y0 - ZONE_OVERLAP), min(H, y1 + ZONE_OVERLAP), max(0, x0 - ZONE_OVERLAP), min(W, x1 + ZONE_OVERLAP)
+            u_t = _richardson_lucy(SL[ty0:ty1, tx0:tx1], gaussian_kernels(cov), iterations, eps)
+            # 權重：區內 1，往外到重疊帶盡頭線性降到 0（畫面邊緣不降）
+            wy = _ramp(ty0, ty1, y0, y1, H)
+            wx = _ramp(tx0, tx1, x0, x1, W)
+            wgt = np.outer(wy, wx).astype(np.float32)
+            num[ty0:ty1, tx0:tx1] += wgt * u_t
+            den[ty0:ty1, tx0:tx1] += wgt
+        u = num / np.maximum(den, 1e-6)
+    new_L = SL + blend * (u - SL)
+    ratio = np.where(SL > eps, new_L / np.maximum(SL, eps), 1.0).astype(np.float32)
+    np.minimum(ratio, 8.0, out=ratio)
+    return ratio
+
+
+ZONES = 3            # 分區量星點形狀：ZONES × ZONES 區
+ZONE_MIN_STARS = 60  # 一區少於這麼多顆典型星就用整張的形狀
+ZONE_OVERLAP = 48    # 相鄰區反卷積重疊、平滑接起來的寬度（px）
+
+
+def _psf_cov(L: np.ndarray, stars: Stars, psf_sigma: float, settings: DetailSettings) -> np.ndarray:
     extra, axis = elongation(measure_shape(L, stars)) if settings.round_stars > 0 else (0.0, None)
     cov = np.eye(2) * psf_sigma ** 2
     if extra > 0:
         cov = cov + min(1.0, settings.round_stars) * extra * np.outer(axis, axis)
-    passes = gaussian_kernels(cov)
+    return cov
 
+
+def _zone_covariances(L: np.ndarray, stars: Stars, psf_sigma: float, settings: DetailSettings):
+    """[(區的範圍 (y0, y1, x0, x1), 該區的 PSF 共變異數)]；畫面太小、或各區都跟整張差不多時回傳 None（用整張一個）。"""
+    H, W = L.shape
+    if min(H, W) < ZONES * 4 * ZONE_OVERLAP:
+        return None
+    whole = _psf_cov(L, stars, psf_sigma, settings)
+    ys = np.linspace(0, H, ZONES + 1).astype(int)
+    xs = np.linspace(0, W, ZONES + 1).astype(int)
+    out, differs = [], False
+    for i in range(ZONES):
+        for j in range(ZONES):
+            sel = (stars.y >= ys[i]) & (stars.y < ys[i + 1]) & (stars.x >= xs[j]) & (stars.x < xs[j + 1])
+            cov = whole
+            if int(sel.sum()) >= ZONE_MIN_STARS:
+                sub = Stars(stars.y[sel], stars.x[sel], stars.radius[sel], stars.saturated[sel], stars.mask, stars.weight,
+                            stars.noise)
+                cov = _psf_cov(L, sub, psf_sigma, settings)
+                differs |= not np.allclose(cov, whole, atol=0.02 * psf_sigma ** 2 + 1e-6)
+            out.append(((ys[i], ys[i + 1], xs[j], xs[j + 1]), cov))
+    return out if differs else None
+
+
+def _ramp(t0: int, t1: int, z0: int, z1: int, n: int) -> np.ndarray:
+    """一維權重：區內 [z0, z1) 為 1，往重疊帶外緣線性降到 0；碰到畫面邊緣的那一側不降。"""
+    idx = np.arange(t0, t1, dtype=np.float32)
+    w = np.ones(t1 - t0, np.float32)
+    if z0 > 0:
+        w = np.minimum(w, np.clip((idx - t0 + 1) / max(1, z0 - t0 + 1), 0, 1))
+    if z1 < n:
+        w = np.minimum(w, np.clip((t1 - idx) / max(1, t1 - z1 + 1), 0, 1))
+    return w
+
+
+def _richardson_lucy(SL: np.ndarray, passes, iterations: int, eps: np.float32) -> np.ndarray:
     def conv(a: np.ndarray) -> np.ndarray:
         for kind, k in passes:
             if kind == "y":
@@ -368,10 +432,7 @@ def _shrink_ratio(L: np.ndarray, SL: np.ndarray, stars: Stars, settings: DetailS
     u = SL.copy()
     for _ in range(iterations):
         u *= conv(SL / np.maximum(conv(u), eps))
-    new_L = SL + blend * (u - SL)
-    ratio = np.where(SL > eps, new_L / np.maximum(SL, eps), 1.0).astype(np.float32)
-    np.minimum(ratio, 8.0, out=ratio)
-    return ratio
+    return u
 
 
 # ---------------------------------------------------------------------- 星點與背景分層

@@ -162,6 +162,40 @@ def test_elongated_stars_become_round():
     assert abs(flux(new) / flux(img[0]) - 1) < 0.05
 
 
+def test_zonal_rounding_handles_different_elongation_per_side(monkeypatch):
+    """左邊的星往 +40° 拉長、右邊往 −40°：分區量形狀要比整張一個平均的形狀修得圓。"""
+    rng = np.random.default_rng(51)
+    img = np.full((H, W), 0.02, np.float32)
+    yy, xx = np.mgrid[-10:11, -10:11]
+
+    def star(deg):
+        a = math.radians(deg)
+        rot = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+        inv = np.linalg.inv(rot @ np.diag([2.0 ** 2, 1.3 ** 2]) @ rot.T)
+        g = np.exp(-0.5 * (inv[0, 0] * yy ** 2 + 2 * inv[0, 1] * yy * xx + inv[1, 1] * xx ** 2)).astype(np.float32)
+        return g / g.sum()
+
+    left, right = star(40), star(-40)
+    for _ in range(700):
+        y, x = int(rng.uniform(15, H - 15)), int(rng.uniform(15, W - 15))
+        img[y - 10:y + 11, x - 10:x + 11] += (left if x < W / 2 else right) * rng.uniform(0.05, 0.3)
+    img += _noise((H, W), 2e-4, 52)
+
+    def side_ellipticity(a, sl):
+        st = detail.find_stars(a)
+        keep = (st.x >= sl.start) & (st.x < sl.stop)
+        sub = detail.Stars(st.y[keep], st.x[keep], st.radius[keep], st.saturated[keep], st.mask, st.weight, st.noise)
+        ev = np.linalg.eigvalsh(detail.measure_shape(a, sub))
+        return 1 - math.sqrt(ev[0] / ev[1])
+
+    sides = (slice(20, W // 3), slice(2 * W // 3, W - 20))
+    zonal = detail.process(img, detail.DetailSettings())
+    monkeypatch.setattr(detail, "ZONES", 1)
+    single = detail.process(img, detail.DetailSettings())
+    for sl in sides:
+        assert side_ellipticity(zonal, sl) < side_ellipticity(single, sl) - 0.05, sl
+
+
 def _star_field(seed: int, n: int = 200):
     rng = np.random.default_rng(seed)
     img = np.stack([np.full((H, W), 0.02, np.float32) for _ in range(3)])
