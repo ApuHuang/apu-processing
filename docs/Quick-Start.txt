@@ -1,4 +1,4 @@
-APU Processing 0.2.1（Astrophotography Processing Utility）
+APU Processing 0.2.2（Astrophotography Processing Utility）
 
 APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式，取代 APU Astro v0.9.8（Swift）。
 
