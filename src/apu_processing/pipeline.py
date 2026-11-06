@@ -117,11 +117,21 @@ class Processor:
             computed.append("color")
         check(cancel)
 
-        key = key + (settings.denoise_enabled, settings.denoise if settings.denoise_enabled else None)
+        layered = settings.detail_enabled and settings.detail.layered
+        key = key + (settings.denoise_enabled, settings.denoise if settings.denoise_enabled else None, layered)
         y = self._get("denoise", key)
         if y is None:
             y = color.apply(x, balance) if balance else x
-            if settings.denoise_enabled:
+            if layered:
+                # 星點與背景分開：只有背景層降噪（星點層留到細節階段處理）
+                layers = detail.split(y)
+                check(cancel)
+                bg = layers.background
+                if settings.denoise_enabled:
+                    progress(0.5, Msg("stage.denoise"))
+                    bg = denoise.reduce(bg, settings.denoise, cancel)
+                y = (bg, layers)
+            elif settings.denoise_enabled:
                 progress(0.5, Msg("stage.denoise"))
                 y = denoise.reduce(y, settings.denoise, cancel)
             self._cache["denoise"] = (key, y)
@@ -132,7 +142,10 @@ class Processor:
         hit = self._get("detail", key)
         if hit is None:
             z = y
-            if settings.detail_enabled:
+            if layered:
+                progress(0.65, Msg("stage.detail"))
+                z = detail.finish(y[0], y[1], settings.detail, cancel)
+            elif settings.detail_enabled:
                 progress(0.65, Msg("stage.detail"))
                 z = detail.process(y, settings.detail, cancel)
             noise = stretch.measure(z, self.pixel_scale)

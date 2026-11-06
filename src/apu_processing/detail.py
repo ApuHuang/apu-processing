@@ -32,6 +32,18 @@ class DetailSettings:
     sharpen: float = 0.5          # 0＝不加強；0.5＝1–2 px 結構約 +15%
     big_star: float = 6.0         # 半徑超過這個（px）開始減少縮小
     huge_star: float = 15.0       # 半徑超過這個完全不縮
+    # 讓拉長的星點變圓（0–1）：量全畫面星點的橢圓，反卷積的模糊多一段沿長軸的部分，長軸縮到跟短軸一樣。
+    # 追蹤、導星讓星點整張往同一個方向拉長時，圓形的模糊只會讓星更扁（NGC7635：橢圓率 0.10–0.13 → 縮星後 0.13–0.17）
+    round_stars: float = 1.0
+    # 星點與背景分層（pipeline 在降噪前拆開）：背景層降噪、加強星雲；星點層不降噪，只清掉邊緣的噪聲、縮星、收緊。
+    # 降噪作用在有星的整張上會把星核壓暗、外圍墊高（星點變軟），邊緣的噪聲也被當成星的一部分留下（毛邊）
+    layered: bool = True
+    # 星點層邊緣：亮度低於 STAR_CLEAN_K 倍噪聲的部分用 garrote 清掉（負的全清）
+    clean_stars: float = 1.0
+    # 收緊：星點層低於局部峰值 TIGHTEN_LEVEL 的部分 × (相對亮度/TIGHTEN_LEVEL)^(TIGHTEN_GAMMA × 縮星 × 這個值)，
+    # 峰值不變、星暈變小 → 拉伸後星點小而亮（剖面仍單調，不會有暗環）。預設關：權重往外平滑降，有一部分星暈留在背景層，
+    # 星點層收緊後大星周圍露出淡淡的圓盤（NGC7635，2026-11-02 使用者看過選「不收緊」）
+    tighten: float = 0.0
 
     def shrink_factor(self) -> float:
         return 1.0 - 0.4 * min(1.0, max(0.0, self.star_reduction))
@@ -45,6 +57,7 @@ class Stars:
     saturated: np.ndarray
     mask: np.ndarray        # 星點範圍（weight > 0）
     weight: np.ndarray      # 星點層的權重：星心 1，往外用餘弦平滑降到 0（沒有硬邊，縮星後不會留下暗框）
+    noise: float = 0.0      # 找星時量的噪聲（8 px 以下結構的 MAD，亮度）
 
 
 # ---------------------------------------------------------------------- 工具
@@ -146,7 +159,7 @@ def find_stars(L: np.ndarray, threshold: float = 5.0) -> Stars:
     weight = (0.5 * (1.0 + np.cos(np.pi * t))).astype(np.float32)
     weight[core] = 1.0
     del dist, iy, ix, t
-    return Stars(np.array(ys), np.array(xs), np.array(rs), np.array(sat, bool), weight > 1e-3, weight)
+    return Stars(np.array(ys), np.array(xs), np.array(rs), np.array(sat, bool), weight > 1e-3, weight, sig)
 
 
 # ---------------------------------------------------------------------- 縮星
@@ -202,6 +215,75 @@ def measure_fwhm(L: np.ndarray, stars: Stars, limit: int = 300) -> float:
     return float(np.median(vals)) if vals else 3.0
 
 
+def measure_shape(L: np.ndarray, stars: Stars, limit: int = 300) -> np.ndarray | None:
+    """典型星點二階矩的中位數 [[syy, syx], [sxy, sxx]]（px²）。星暈、噪聲讓兩軸都變大，但長短軸的差不受影響。"""
+    h, w = L.shape
+    r = 6
+    yy, xx = np.indices((2 * r + 1, 2 * r + 1))
+    vals = []
+    for y, x in _typical_stars(stars):
+        if len(vals) >= limit:
+            break
+        if y < r + 3 or x < r + 3 or y >= h - r - 3 or x >= w - r - 3:
+            continue
+        outer = L[y - r - 3:y + r + 4, x - r - 3:x + r + 4]
+        bg = np.median(np.r_[outer[:3].ravel(), outer[-3:].ravel(), outer[:, :3].ravel(), outer[:, -3:].ravel()])
+        f = np.clip(L[y - r:y + r + 1, x - r:x + r + 1].astype(np.float64) - bg, 0, None)
+        tot = f.sum()
+        if tot <= 0:
+            continue
+        cy, cx = (f * yy).sum() / tot, (f * xx).sum() / tot
+        vals.append(((f * (yy - cy) ** 2).sum() / tot, (f * (yy - cy) * (xx - cx)).sum() / tot,
+                     (f * (xx - cx) ** 2).sum() / tot))
+    if len(vals) < 20:
+        return None
+    syy, syx, sxx = np.median(np.array(vals), axis=0)
+    return np.array([[syy, syx], [syx, sxx]])
+
+
+# 橢圓率（1 − 短軸／長軸）低於這個就當成圓的（量測本身的誤差），照舊用圓形的模糊
+ROUND_MIN_ELLIPTICITY = 0.04
+
+
+def elongation(shape: np.ndarray | None) -> tuple[float, np.ndarray]:
+    """回傳 (長短軸變異數的差 px², 長軸方向 (dy, dx))；沒有量到或接近圓形時差是 0。"""
+    if shape is None:
+        return 0.0, np.array([1.0, 0.0])
+    ev, vec = np.linalg.eigh(shape)
+    if ev[0] <= 0 or 1 - math.sqrt(ev[0] / ev[1]) < ROUND_MIN_ELLIPTICITY:
+        return 0.0, vec[:, 1]
+    return float(ev[1] - ev[0]), vec[:, 1]
+
+
+def _gauss1d(sigma: float) -> np.ndarray:
+    radius = max(1, int(math.ceil(4 * sigma)))
+    k = np.exp(-0.5 * (np.arange(-radius, radius + 1) / max(sigma, 1e-3)) ** 2).astype(np.float32)
+    return k / k.sum()
+
+
+def _diagonal(a: np.ndarray, kernel: np.ndarray, sign: int) -> np.ndarray:
+    """沿對角線（往下一列、往右 sign 欄）做一維卷積，超出邊界當成 0。"""
+    r = len(kernel) // 2
+    h, w = a.shape
+    p = np.pad(a, r)
+    out = np.zeros_like(a)
+    for k, wt in enumerate(kernel):
+        d = k - r
+        out += wt * p[r + d:r + d + h, r + sign * d:r + sign * d + w]
+    return out
+
+
+def gaussian_kernels(cov: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    """任意方向的二維高斯（共變異數 cov，[[yy, yx], [xy, xx]]）拆成水平、垂直、對角三次一維卷積：
+    cov ＝ a·x̂x̂ᵀ ＋ b·ŷŷᵀ ＋ c·d̂d̂ᵀ，d̂ ＝ (1, ±1)/√2、c ＝ 2|yx|；對角一步是 √2 px，所以步數的變異數是 c/2。"""
+    syy, syx, sxx = float(cov[0, 0]), float(cov[0, 1]), float(cov[1, 1])
+    c = 2 * abs(syx)
+    out = [("y", _gauss1d(math.sqrt(max(syy - c / 2, 1e-6)))), ("x", _gauss1d(math.sqrt(max(sxx - c / 2, 1e-6))))]
+    if c > 1e-4:
+        out.append(("d+" if syx > 0 else "d-", _gauss1d(math.sqrt(c / 2))))
+    return out
+
+
 def measure_core_fwhm(L: np.ndarray, stars: Stars, limit: int = 300) -> float:
     """典型星點核心半高寬（core_fwhm）的中位數。"""
     vals = []
@@ -240,12 +322,20 @@ def reduce_stars(image: np.ndarray, stars: Stars, settings: DetailSettings,
     background = inpaint(planes, stars.mask)
     S = (np.maximum(planes - background, 0) * stars.weight[None]).astype(np.float32)
     del background
-    f = settings.shrink_factor()
-    if f >= 0.999:
+    ratio = _shrink_ratio(planes.mean(axis=0), S.mean(axis=0), stars, settings, iterations)
+    if ratio is None:
         return image, S
-    L = planes.mean(axis=0)
+    out = planes + S * (ratio[None] - 1.0)
+    return (out[0] if image.ndim == 2 else out.astype(np.float32)), S
+
+
+def _shrink_ratio(L: np.ndarray, SL: np.ndarray, stars: Stars, settings: DetailSettings,
+                  iterations: int = 15) -> np.ndarray | None:
+    """星點層亮度 SL 反卷積後 ÷ 前的比例（星點層乘上它＝縮星）；不縮時回傳 None。L 是量星點大小用的整張亮度。"""
+    f = settings.shrink_factor()
+    if f >= 0.999 or len(stars.y) == 0:
+        return None
     psf_sigma = deconvolution_fwhm(L, stars, f) / 2.3548
-    SL = S.mean(axis=0)
     # 大星、飽和星不縮：用權重在原本與反卷積結果之間混合（同一塊裡有大星就整塊保守）
     lab, _ = ndimage.label(stars.mask)
     weight_by_star = np.clip((settings.huge_star - stars.radius) / (settings.huge_star - settings.big_star), 0, 1)
@@ -258,13 +348,22 @@ def reduce_stars(image: np.ndarray, stars: Stars, settings: DetailSettings,
     blend = comp_weight[lab]
     del lab
     eps = np.float32(max(1e-12, float(SL.max()) * 1e-7))
-    radius = int(math.ceil(4 * psf_sigma))
-    kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / max(psf_sigma, 1e-3)) ** 2).astype(np.float32)
-    kernel /= kernel.sum()
+    # 模糊＝圓形的部分（縮小）＋沿長軸多出來的部分（變圓）
+    extra, axis = elongation(measure_shape(L, stars)) if settings.round_stars > 0 else (0.0, None)
+    cov = np.eye(2) * psf_sigma ** 2
+    if extra > 0:
+        cov = cov + min(1.0, settings.round_stars) * extra * np.outer(axis, axis)
+    passes = gaussian_kernels(cov)
 
     def conv(a: np.ndarray) -> np.ndarray:
-        return ndimage.correlate1d(ndimage.correlate1d(a, kernel, axis=0, mode="constant"), kernel, axis=1,
-                                   mode="constant")
+        for kind, k in passes:
+            if kind == "y":
+                a = ndimage.correlate1d(a, k, axis=0, mode="constant")
+            elif kind == "x":
+                a = ndimage.correlate1d(a, k, axis=1, mode="constant")
+            else:
+                a = _diagonal(a, k, 1 if kind == "d+" else -1)
+        return a
 
     u = SL.copy()
     for _ in range(iterations):
@@ -272,8 +371,86 @@ def reduce_stars(image: np.ndarray, stars: Stars, settings: DetailSettings,
     new_L = SL + blend * (u - SL)
     ratio = np.where(SL > eps, new_L / np.maximum(SL, eps), 1.0).astype(np.float32)
     np.minimum(ratio, 8.0, out=ratio)
-    out = planes + S * (ratio[None] - 1.0)
-    return (out[0] if image.ndim == 2 else out.astype(np.float32)), S
+    return ratio
+
+
+# ---------------------------------------------------------------------- 星點與背景分層
+
+
+STAR_CLEAN_K = 2.0      # 星點層：亮度低於幾倍噪聲完全換成 3×3 中位數的版本
+STAR_CLEAN_HIGH = 6.0   # 高於幾倍噪聲完全照原樣
+TIGHTEN_LEVEL = 0.5     # 收緊：局部峰值的這個比例以下才壓
+TIGHTEN_GAMMA = 1.0     # 收緊的指數（× 縮星強度 × tighten）；縮星 50% 時 0.5
+TIGHTEN_BOOST = 0.0     # 星核加亮：局部峰值 TIGHTEN_LEVEL 以上 × (1 ＋ 這個 × 縮星強度 × tighten × 高出的比例)
+TIGHTEN_WINDOW = 11     # 局部峰值的範圍（px）：比這遠的星暈不算同一顆（大星本來就不縮）
+
+
+@dataclass
+class Layers:
+    background: np.ndarray   # 背景層（星點底下用周圍補，邊緣跟原圖平滑接上）；形狀跟原圖一樣
+    stars_layer: np.ndarray  # 星點層 (C, H, W)；background + stars_layer ＝ 原圖
+    stars: Stars
+    L: np.ndarray            # 拆開前的亮度（量星點大小用）
+
+
+def split(image: np.ndarray) -> Layers:
+    """拆成背景層與星點層（相加等於原圖）。星點層＝(影像 − 星點下的背景) × 平滑權重，有正有負（含噪聲）。"""
+    planes = image[None] if image.ndim == 2 else image
+    L = planes.mean(axis=0)
+    stars = find_stars(L)
+    if len(stars.y) == 0:
+        return Layers(image.copy(), np.zeros_like(planes), stars, L)
+    under = inpaint(planes, stars.mask)
+    # 試過範圍再往外擴 8 px 補一次、兩個取暗的（想讓星暈留在星點層、收緊後不留圓盤）：補的值比真的背景暗，
+    # 星點層清邊緣時把混在裡面的背景一起清掉 → 亮星周圍暗斑（17 組亮星黑塊 0.018→0.025、WR134 0.005→0.016），不用
+    S = ((planes - under) * stars.weight[None]).astype(np.float32)
+    del under
+    bg = (planes - S).astype(np.float32)
+    return Layers(bg[0] if image.ndim == 2 else bg, S, stars, L)
+
+
+def clean_layer(S: np.ndarray, noise: float, strength: float = 1.0) -> np.ndarray:
+    """星點層的邊緣噪聲：星點本體（亮度 > STAR_CLEAN_HIGH 倍噪聲）照原樣，接近噪聲的地方換成 3×3 中位數，
+    中間平滑過渡。星暈的光留著，只是噪聲的毛邊不見。
+    （試過把接近噪聲的部分用 garrote 扣掉：連亮星外圍真的星暈也扣掉，周圍一圈暗斑——17 組亮星黑塊 WR134 0.005→0.016）"""
+    if strength <= 0 or noise <= 0:
+        return S
+    # 中位數：去掉孤立的噪聲點，但不會把星核的光往外推（試過高斯模糊：核心的光漏到外圍，每顆星一圈亮環）
+    soft = np.stack(list(_POOL.map(lambda p: ndimage.median_filter(p, size=3), S)))
+    level = blur(S.mean(axis=0), 1.0) / np.float32(noise * strength)
+    a = np.clip((level - STAR_CLEAN_K) / (STAR_CLEAN_HIGH - STAR_CLEAN_K), 0.0, 1.0)
+    a = (a * a * (3 - 2 * a)).astype(np.float32)
+    return (soft + a[None] * (S - soft)).astype(np.float32)
+
+
+def tighten_layer(S: np.ndarray, settings: DetailSettings) -> np.ndarray:
+    """局部峰值 TIGHTEN_LEVEL 以下的部分壓低，峰值不變；r·h(r) 隨 r 遞增，剖面仍單調。"""
+    strength = min(1.0, max(0.0, settings.star_reduction)) * settings.tighten
+    gamma, boost = TIGHTEN_GAMMA * strength, TIGHTEN_BOOST * strength
+    if gamma <= 0 and boost <= 0:
+        return S
+    SL = S.mean(axis=0)
+    peak = ndimage.maximum_filter(SL, size=TIGHTEN_WINDOW, mode="constant")
+    rel = np.clip(SL / np.maximum(peak, 1e-30), 0.0, 1.0)
+    low = np.power(np.clip(rel / TIGHTEN_LEVEL, 0.0, 1.0), gamma, dtype=np.float32)
+    high = 1.0 + boost * np.clip((rel - TIGHTEN_LEVEL) / (1.0 - TIGHTEN_LEVEL), 0.0, 1.0)
+    h = np.where(SL > 0, np.where(rel < TIGHTEN_LEVEL, low, high), 1.0).astype(np.float32)
+    return S * h[None]
+
+
+def finish(background: np.ndarray, layers: Layers, settings: DetailSettings,
+           cancel: CancelCheck = never_cancel) -> np.ndarray:
+    """分層處理的後半：背景層（已降噪）加強星雲；星點層清邊緣、縮星（變圓）、收緊；再合起來。"""
+    stars = layers.stars
+    S = clean_layer(layers.stars_layer, stars.noise, settings.clean_stars)
+    check(cancel)
+    ratio = _shrink_ratio(layers.L, np.maximum(S.mean(axis=0), 0), stars, settings) if len(stars.y) else None
+    if ratio is not None:
+        S = S * ratio[None]
+    S = tighten_layer(S, settings)
+    check(cancel)
+    bg = sharpen(background, stars.weight, settings)
+    return (bg + S[0]) if bg.ndim == 2 else (bg + S).astype(np.float32)
 
 
 # ---------------------------------------------------------------------- 星雲細節
