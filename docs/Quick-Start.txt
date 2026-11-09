@@ -17,6 +17,7 @@ APU Astro 系列的後製軟體。Mac 與 Windows 同一套程式，取代 APU A
 6. 疊圖邊緣有壞邊時，先按「裁切」拖出要保留的範圍再「套用」；master 旁邊有覆蓋率圖（檔名加 _coverage）時，可以按「依覆蓋率建議裁切」自動畫出範圍。也可以旋轉 90° 與左右／上下翻轉。原始檔不會被修改，「還原」回到原樣。
 7. 滾輪或觸控板縮放（以游標為中心），拖曳平移，雙擊回到符合視窗（⌘0／Ctrl+0；⌘1 是 100%）。
 8. 「儲存」：PNG／JPEG／TIFF（16-bit）存成品；FITS 存線性處理結果（32-bit 浮點）。
+9. 有新版時，頂部版號旁邊會出現藍色的「↓ 新版」，按一下用瀏覽器下載。程式開啟時會連到 GitHub 查版本（一天最多一次，不送個人資料；沒網路不影響使用），不想檢查可以在「說明」選單取消「開啟時檢查新版本」。
 
 多濾鏡合成（0.2.0 新增）
 - 右側最上面的「合成」可以切換 HOO（Ha → 紅，OIII → 綠與藍）、SHO（SII → 紅，Ha → 綠，OIII → 藍）、RGB。
@@ -52,6 +53,7 @@ First launch (Windows): extract the zip, run APUProcessing.exe; if SmartScreen a
 4. Finishing (brightness, contrast, saturation, remove green, per-channel curves) only redraws the screen.
 5. Crop, rotate 90°, and flip without touching the file; Reset goes back to the file as loaded. When a master has a coverage map next to it (its name with _coverage), "Suggest crop from coverage" draws the well-covered area for you.
 6. Save as PNG / JPEG / TIFF (16-bit) for the finished image, or FITS for the linear result.
+7. When a new version is out, a blue "↓ New" badge appears next to the version number; click it to download in your browser. The app asks GitHub for the latest version at startup (at most once a day, no personal data; works offline too). Turn this off with Help > Check for New Versions at Startup.
 
 Combine (new in 0.2.0): HOO, SHO or RGB from mono masters, matched by their FILTER keyword (common spellings such as Ha/H, OIII/O, SII/S are recognized; change it in the drop-down if wrong). Each channel has its own sky removed and its noise brought to the same level before combining, so a weak channel is not blown up into noise; raise a channel's Strength to make it stand out. Hubble palette (100% for SHO) turns excess green into gold and blue tones after the stretch without changing brightness. HOO and SHO are not color calibrated by default. With coverage maps, gradient removal samples only well-covered areas.
 

@@ -20,6 +20,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import webbrowser
 from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -27,7 +28,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import __version__, compose, coverage, display, geometry, imageio, pipeline, recipe, stretch
+from . import __version__, compose, coverage, display, geometry, imageio, pipeline, recipe, stretch, update
 from .canvas import ImageCanvas
 from .curves import CurveEditor
 from .darkroom import (IS_MAC, Darkroom, Fonts, MetricRow, PanelGroup, ParameterSlider, ParameterToggle,
@@ -69,6 +70,20 @@ def _compose_title(preset: str, stems: list[str], limit: int = 60) -> str:
     else:
         text = f"{preset} · {' + '.join(stems)}"
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _ellipsize(text: str, font: tk.font.Font, width: int) -> str:
+    """放得進 width 像素就原樣；放不下從後面截掉、加「…」（最少留一個字）。"""
+    if font.measure(text) <= width:
+        return text
+    lo, hi = 1, len(text)
+    while lo < hi:                          # 最長的、加上「…」還放得下的前段
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid].rstrip() + "…") <= width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + "…"
 
 
 class _Job:
@@ -118,6 +133,8 @@ class ProcessingView(tk.Frame):
         # 疊圖覆蓋率（最多張數的幾成，原始檔方向）與依它建議的裁切框（原始檔座標）；沒有覆蓋率圖就是 None
         self.coverage: np.ndarray | None = None
         self.coverage_box: tuple[int, int, int, int] | None = None
+        # 新版本：check_for_updates() 查到比目前新的版本時才有，頂部版號旁邊出現下載鍵
+        self.update_info: update.Update | None = None
 
         st = load_settings()
         self.panel_state: dict[str, bool] = dict(st.get("panel", {}))
@@ -183,6 +200,9 @@ class ProcessingView(tk.Frame):
         s, a = self.settings, self.adjust
         self.lang_var = tk.StringVar(value=get_language())
         self.view_var = tk.StringVar(value="current")
+        # 選單「開啟時檢查新版本」（獨立版的說明選單用）
+        self.update_check_var = tk.BooleanVar(value=update.enabled())
+        self.update_check_var.trace_add("write", lambda *_: self.set_update_check(bool(self.update_check_var.get())))
         self.v = {
             "background_enabled": tk.BooleanVar(value=s.background_enabled),
             "color_enabled": tk.BooleanVar(value=s.color_enabled),
@@ -318,6 +338,17 @@ class ProcessingView(tk.Frame):
         badge.pack(side="left", padx=(self.px(7), 0))
         tk.Label(badge, text=f"v{__version__}", font=self.fonts.badge, fg=D.beta, bg=D.chrome,
                  padx=self.px(4)).pack()
+        # 有新版才出現：跟版號同樣的小框（藍色），按一下用瀏覽器下載
+        self.update_badge = tk.Frame(identity, bg=D.accent, padx=1, pady=1, cursor="hand2")
+        self.update_label = tk.Label(self.update_badge, font=self.fonts.badge, fg=D.accent, bg=D.chrome,
+                                     padx=self.px(4), cursor="hand2")
+        self.update_label.pack()
+        for w in (self.update_badge, self.update_label):
+            w.bind("<Button-1>", lambda _e: self.open_update())
+        self.update_label.bind("<Enter>", lambda _e: self.update_label.configure(bg=D.hover))
+        self.update_label.bind("<Leave>", lambda _e: self.update_label.configure(bg=D.chrome))
+        self._update_tooltip = Tooltip(self.update_label, "", self)
+        self._show_update(self.update_info)
 
         actions = tk.Frame(bar, bg=D.chrome)
         actions.pack(side="right", padx=(0, self.px(14)))
@@ -344,6 +375,9 @@ class ProcessingView(tk.Frame):
         self.view_seg.pack(side="left")
         self.doc_title = tk.Label(middle, font=self.fonts.ui, fg=D.secondary, bg=D.chrome)
         self.doc_title.pack(side="left", padx=self.px(14))
+        # 檔名放不下時從後面截掉加「…」（標籤不會自己縮，放不下會兩頭被切掉）
+        self._top_parts = (bar, identity, actions)
+        bar.bind("<Configure>", lambda _e: self._fit_doc_title())
 
     def _build_status_bar(self) -> None:
         D = Darkroom
@@ -577,9 +611,9 @@ class ProcessingView(tk.Frame):
             self.empty.place(relx=0.5, rely=0.45, anchor="center")
         if self.composer is not None:
             stems = [self.compose_paths[c.source].stem for c in self.compose_settings.channels if c.source >= 0]
-            self.doc_title.configure(text=_compose_title(self.compose_settings.preset, stems))
+            self._set_doc_title(_compose_title(self.compose_settings.preset, stems))
         else:
-            self.doc_title.configure(text=self.path.name if self.path else tr("gui.no_image"))
+            self._set_doc_title(self.path.name if self.path else tr("gui.no_image"))
         self.denoise_slider.set_enabled(bool(self.v["denoise_enabled"].get()))
         on = bool(self.v["detail_enabled"].get())
         self.stars_slider.set_enabled(on)
@@ -1013,6 +1047,10 @@ class ProcessingView(tk.Frame):
                 elif kind == "saved":
                     self.set_status("gui.status.saved", name=ev[1])
                     self._refresh_all()
+                elif kind == "update":
+                    update.remember(ev[1])
+                    if update.enabled():
+                        self._show_update(update.newer(ev[1]))
                 elif kind == "error":
                     self.job = None
                     self.set_status("gui.status.error")
@@ -1068,6 +1106,70 @@ class ProcessingView(tk.Frame):
         """有處理工作在跑（關閉視窗前要詢問）。"""
         return self.job is not None
 
+    # ------------------------------------------------------------------ 新版本
+
+    def check_for_updates(self) -> None:
+        """有沒有新版：先用上次查到的結果顯示，一天沒查過才在背景連 GitHub（沒網路就算了）。
+        獨立版的 main() 開窗後呼叫；嵌在別的程式裡時由外面決定要不要呼叫。"""
+        st = load_settings()
+        if not update.enabled(st):
+            self._show_update(None)
+            return
+        self._show_update(update.newer(update.cached(st)))
+        if update.due(st):
+            events = self.events
+
+            def work() -> None:
+                try:
+                    events.put(("update", update.fetch_latest()))
+                except Exception:  # noqa: BLE001  沒網路、被擋、格式不對：不打擾使用者
+                    pass
+
+            threading.Thread(target=work, daemon=True).start()
+
+    def set_update_check(self, on: bool) -> None:
+        save_settings(check_updates=bool(on))
+        if on:
+            self.check_for_updates()
+        else:
+            self._show_update(None)
+
+    def _show_update(self, info: update.Update | None) -> None:
+        self.update_info = info
+        if not hasattr(self, "update_badge"):
+            return
+        if info is None:
+            self.update_badge.pack_forget()
+        else:
+            self.update_label.configure(text=tr("gui.update.badge", version=info.version))
+            self._update_tooltip.text = tr("gui.update.help", version=info.version, current=__version__,
+                                           file=info.file or tr("gui.update.page"))
+            self.update_badge.pack(side="left", padx=(self.px(5), 0))
+        self.after_idle(self._fit_doc_title)       # 頂部左邊變寬／變窄，檔名能用的空間跟著變
+
+    def _set_doc_title(self, text: str) -> None:
+        self._doc_title_full = text
+        self._fit_doc_title()
+
+    def _fit_doc_title(self) -> None:
+        text = getattr(self, "_doc_title_full", "")
+        try:
+            bar, identity, actions = self._top_parts
+            width = bar.winfo_width()
+            if width <= 1:                         # 還沒排版好：先放完整的，排好後 <Configure> 會再來
+                self.doc_title.configure(text=text)
+                return
+            # 左右邊界各 14、檔名兩側各 14，再留 4 px
+            room = (width - identity.winfo_reqwidth() - actions.winfo_reqwidth() - self.view_seg.winfo_reqwidth()
+                    - self.px(14) * 4 - self.px(4))
+            self.doc_title.configure(text=_ellipsize(text, self.fonts.ui, room))
+        except (tk.TclError, AttributeError):
+            pass
+
+    def open_update(self) -> None:
+        if self.update_info is not None:
+            webbrowser.open(self.update_info.url)
+
     def close(self) -> None:
         """取消背景工作、停掉排程。呼叫端接著 destroy() 這個 View；整合版關掉分頁後請在主執行緒 gc.collect()，
         不然 View 的 Tk 變數可能在背景執行緒被 Python 的循環回收釋放（tkinter 會忽略，但不乾淨）。"""
@@ -1100,6 +1202,10 @@ def _build_menubar(root: tk.Tk, view: ProcessingView) -> None:
     menubar.add_cascade(label=tr("gui.menu.view"), menu=view_menu)
     if IS_MAC:
         menubar.add_cascade(label=tr("gui.menu.window"), menu=tk.Menu(menubar, name="window"))
+    help_menu = tk.Menu(menubar, tearoff=False, **({"name": "help"} if IS_MAC else {}))
+    help_menu.add_checkbutton(label=tr("gui.menu.check_updates"), variable=view.update_check_var)
+    help_menu.add_command(label=tr("gui.menu.releases"), command=lambda: webbrowser.open(update.RELEASES_URL))
+    menubar.add_cascade(label=tr("gui.menu.help"), menu=help_menu)
     root.configure(menu=menubar)
 
 
@@ -1159,6 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
     files = [a for a in argv if not a.startswith("-")]
     if files:
         root.after(200, lambda: view.open_images(files))
+    root.after(1500, view.check_for_updates)
     root.mainloop()
     return 0
 

@@ -159,6 +159,39 @@ def _masters(tmp_path):
     return paths
 
 
+def test_update_badge_shows_only_for_a_newer_version(view, tk_root, monkeypatch):
+    opened, fetched = [], []
+    monkeypatch.setattr(gui.webbrowser, "open", opened.append)
+    monkeypatch.setattr(gui.update, "fetch_latest", lambda *a, **k: fetched.append(1) or {})
+    assert view.update_badge.winfo_manager() == ""                     # 一開始沒有
+    same = {"tag_name": f"v{gui.__version__}", "assets": []}
+    view.events.put(("update", same))
+    _wait(tk_root, lambda: gui.update.cached() is not None)
+    assert view.update_info is None and view.update_badge.winfo_manager() == ""
+    zip_name = f"APUProcessing-99.0.0-{gui.update.platform_tag()}.zip"
+    newer = {"tag_name": "v99.0.0", "html_url": "https://github.com/x/releases/tag/v99.0.0",
+             "assets": [{"name": zip_name, "browser_download_url": "https://github.com/x/dl.zip"}]}
+    view.events.put(("update", newer))
+    _wait(tk_root, lambda: view.update_info is not None)
+    assert view.update_badge.winfo_manager() == "pack" and "99.0.0" in view.update_label.cget("text")
+    view.open_update()
+    assert opened == ["https://github.com/x/dl.zip"]
+    view.rebuild()                                                      # 換語言重建後還在
+    assert view.update_badge.winfo_manager() == "pack"
+    view.update_check_var.set(False)                                    # 說明選單關掉檢查
+    assert view.update_badge.winfo_manager() == "" and not gui.update.enabled()
+    view.update_check_var.set(True)                                     # 再打開：一天內用存起來的結果，不連網
+    assert view.update_info.version == "99.0.0" and fetched == []
+
+
+def test_long_titles_are_cut_with_an_ellipsis(tk_root):
+    from tkinter import font
+    f = font.Font(tk_root, size=9)
+    assert gui._ellipsize("NGC7635.fits", f, 1000) == "NGC7635.fits"
+    cut = gui._ellipsize("很長的檔名" * 10, f, 120)
+    assert cut.endswith("…") and f.measure(cut) <= 120 and len(cut) > 3
+
+
 def test_compose_title_is_short():
     assert gui._compose_title("SHO", ["NGC2244_S", "NGC2244_H", "NGC2244_O"]) == "SHO · NGC2244 (S + H + O)"
     assert gui._compose_title("HOO", ["M42_Ha", "M43_Ha"]) == "HOO · M42_Ha + M43_Ha"   # 不在分隔符號中間切

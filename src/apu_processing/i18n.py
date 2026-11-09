@@ -91,6 +91,13 @@ _ZH: dict[str, str] = {
     "gui.menu.fit": "符合視窗",
     "gui.menu.actual": "100%",
     "gui.menu.window": "視窗",
+    "gui.menu.help": "說明",
+    "gui.menu.check_updates": "開啟時檢查新版本",
+    "gui.menu.releases": "下載頁面",
+    "gui.update.badge": "↓ 新版 v{version}",
+    "gui.update.help": "有新版本 {version}（目前是 {current}）。按一下用瀏覽器下載：{file}\n"
+                       "只會連到 GitHub 查版本，一天最多一次；不想檢查可以在「說明」選單關掉。",
+    "gui.update.page": "下載頁面",
     "gui.confirm.quit": "還在處理中，確定要結束嗎？",
     # 面板
     "gui.group.info": "影像",
@@ -211,6 +218,13 @@ _EN: dict[str, str] = {
     "gui.menu.fit": "Fit to Window",
     "gui.menu.actual": "100%",
     "gui.menu.window": "Window",
+    "gui.menu.help": "Help",
+    "gui.menu.check_updates": "Check for New Versions at Startup",
+    "gui.menu.releases": "Download Page",
+    "gui.update.badge": "↓ New v{version}",
+    "gui.update.help": "Version {version} is available (you have {current}). Click to download it in your browser: {file}\n"
+                       "Only GitHub is contacted, at most once a day; turn this off in the Help menu.",
+    "gui.update.page": "download page",
     "gui.confirm.quit": "Processing is still running. Quit anyway?",
     "gui.group.info": "Image",
     "gui.group.info.info": "Size: width × height.\nNoise: the 8 px noise the stretch uses (measured after processing).\nColor gains: how much red, green and blue were scaled so that the average star is white.",
