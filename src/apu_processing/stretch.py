@@ -131,7 +131,9 @@ def _faint_signal(planes: np.ndarray, L: np.ndarray, tile: int, sigma: float) ->
     step = 2 if tile >= 16 else 1
 
     def tile_median(p: np.ndarray) -> np.ndarray:
-        v = p[:th * tile:step, :tw * tile:step].reshape(th, tile // step, tw, tile // step)
+        # 每個區塊各自隔點抽樣。以前是整張先隔點抽再切區塊：區塊邊長是奇數時（縮圖倍率 3 → 21 px）
+        # 抽出來的列數不是 th × tile//step，reshape 失敗；偶數時兩種寫法取到的像素完全一樣
+        v = p[:th * tile, :tw * tile].reshape(th, tile, tw, tile)[:, ::step, :, ::step]
         return np.median(v.transpose(0, 2, 1, 3).reshape(th, tw, -1), axis=2).ravel()
 
     med = np.stack([tile_median(p) for p in planes])

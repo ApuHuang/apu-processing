@@ -117,12 +117,23 @@ def inpaint(planes: np.ndarray, mask: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------- 找星
 
 
+def _fine_mad(top: np.ndarray) -> float:
+    h, w = top.shape
+    sample = top[:: max(1, h // 512), :: max(1, w // 512)]
+    return 1.4826 * float(np.median(np.abs(sample - np.median(sample))))
+
+
+def fine_noise(L: np.ndarray) -> float:
+    """找星用的噪聲：亮度扣掉 starlet 前三層以外的部分（8 px 以下的結構），抽樣取 MAD。
+    跟 find_stars 的門檻同一個單位（APU Astro Studio 用它換算降噪前後的找星門檻）。"""
+    _coeffs, smooth = denoise.starlet(L, 3)
+    return _fine_mad(L - smooth)
+
+
 def find_stars(L: np.ndarray, threshold: float = 5.0) -> Stars:
     coeffs, smooth = denoise.starlet(L, 3)
     top = L - smooth                      # 8 px 以下的結構
-    h, w = L.shape
-    sample = top[:: max(1, h // 512), :: max(1, w // 512)]
-    sig = 1.4826 * float(np.median(np.abs(sample - np.median(sample))))
+    sig = _fine_mad(top)
     cand = top > threshold * max(sig, 1e-12)
     lab, n = ndimage.label(cand)
     ys, xs, rs, sat = [], [], [], []

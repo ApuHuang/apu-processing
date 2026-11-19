@@ -1,0 +1,64 @@
+# 每次 push：用這一版的 APU Processing 跑 APU Astro Studio（整合版）的契約測試。
+# Studio 只透過 apu_processing.api 使用 Processing；這些測試用固定的小圖檢查 api 裡每個函式的輸出。
+# 失敗＝這次的改動會改變整合版的結果：是要的改變就在 Studio 那邊更新快照（APU_UPDATE_SNAPSHOTS=1），不是就修這裡。
+# Studio 是公開 repo，不需要 token。
+
+name: Studio contract
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: apu-processing
+      - uses: actions/checkout@v4
+        with:
+          repository: ApuHuang/apu-astro-studio
+          path: apu-astro-studio
+      - name: Studio 用的 Pick、Photons 版本（從 Studio 的 packaging/constraints.txt 讀）
+        id: ver
+        run: |
+          C=apu-astro-studio/packaging/constraints.txt
+          for n in pick photons; do
+            echo "$n=v$(grep -E "^apu-$n==" $C | cut -d= -f3 | tr -d '\r ')" >> "$GITHUB_OUTPUT"
+          done
+          # Processing 用這次 push 的版本，不檢查版號
+          grep -v '^apu-processing==' $C > constraints-ci.txt
+      - uses: actions/checkout@v4
+        with:
+          repository: ApuHuang/apu-pick
+          ref: ${{ steps.ver.outputs.pick }}
+          path: astro-light-selector
+      - uses: actions/checkout@v4
+        with:
+          repository: ApuHuang/apu-photons
+          ref: ${{ steps.ver.outputs.photons }}
+          path: ApuPhotonsUtility
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安裝
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints-ci.txt PySide6 pyqtgraph pytest onnxruntime lz4 zstandard
+          python -m pip install -c constraints-ci.txt -e ./astro-light-selector -e ./ApuPhotonsUtility -e ./apu-processing
+          python -m pip install -c constraints-ci.txt -e ./apu-astro-studio --no-deps
+      - name: 契約測試
+        working-directory: apu-astro-studio
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests/contract/test_processing.py tests/test_processing_api_only.py
